@@ -401,7 +401,7 @@ def _get_structural_engine(cfg: CodeBrainConfig):
     if not reader.is_available():
         typer.echo("Error: AST index not found. Run ast-index first.")
         raise typer.Exit(1)
-    return StructuralQueryEngine(reader)
+    return StructuralQueryEngine(reader, project_root=cfg.project_root)
 
 
 def _get_semantic_engine(cfg: CodeBrainConfig):

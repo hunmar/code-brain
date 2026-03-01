@@ -170,6 +170,21 @@ class ASTIndexReader:
             signature=r["signature"] or "", parent_id=r["parent_id"]
         ) for r in rows]
 
+    def get_file_outline_by_suffix(self, filename: str) -> list[Symbol]:
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT s.id, s.name, s.kind, f.path, s.line, s.signature, s.parent_id
+            FROM symbols s
+            JOIN files f ON s.file_id = f.id
+            WHERE f.path LIKE ?
+            ORDER BY s.line
+        """, (f"%/{filename}",)).fetchall()
+        return [Symbol(
+            id=r["id"], name=r["name"], kind=r["kind"],
+            file_path=r["path"], line=r["line"],
+            signature=r["signature"] or "", parent_id=r["parent_id"]
+        ) for r in rows]
+
     def close(self) -> None:
         if self._conn:
             self._conn.close()

@@ -1,9 +1,12 @@
+from pathlib import Path
+
 from code_brain.ingestion.ast_index import ASTIndexReader
 
 
 class StructuralQueryEngine:
-    def __init__(self, reader: ASTIndexReader):
+    def __init__(self, reader: ASTIndexReader, project_root: Path | None = None):
         self._reader = reader
+        self._project_root = project_root
 
     def find(self, name: str | None = None, kind: str | None = None,
              limit: int = 100) -> list[dict]:
@@ -38,8 +41,25 @@ class StructuralQueryEngine:
             for d in deps
         ]
 
-    def outline(self, file_path: str) -> list[dict]:
-        symbols = self._reader.get_file_outline(file_path)
+    def outline(self, file_path: str, project_root: Path | None = None) -> list[dict]:
+        root = project_root or self._project_root
+        normalized = file_path
+
+        # Strip leading ./
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+
+        # Strip project root prefix if absolute path
+        if root and normalized.startswith(str(root)):
+            normalized = normalized[len(str(root)):].lstrip("/")
+
+        # Try exact match first
+        symbols = self._reader.get_file_outline(normalized)
+
+        # Fallback: suffix match (user gave "user.py", DB has "src/models/user.py")
+        if not symbols and "/" not in normalized:
+            symbols = self._reader.get_file_outline_by_suffix(normalized)
+
         return [
             {
                 "name": s.name,

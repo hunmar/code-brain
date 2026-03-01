@@ -72,3 +72,22 @@ def test_outline(engine):
     assert len(result) == 2
     names = [s["name"] for s in result]
     assert "User" in names
+
+
+def test_outline_with_dot_slash(engine):
+    """./src/models/user.py should match src/models/user.py."""
+    result = engine.outline("./src/models/user.py")
+    assert len(result) == 2
+
+
+def test_outline_with_absolute_path(engine, sample_db):
+    """Absolute path should be stripped to relative."""
+    abs_path = str(sample_db / "src/models/user.py")
+    result = engine.outline(abs_path, project_root=sample_db)
+    assert len(result) == 2
+
+
+def test_outline_suffix_match(engine):
+    """user.py alone should match src/models/user.py."""
+    result = engine.outline("user.py")
+    assert len(result) == 2
