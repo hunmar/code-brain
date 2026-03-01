@@ -196,7 +196,7 @@ def ingest(
 
 @app.command()
 def find(
-    name: Optional[str] = typer.Option(None, help="Symbol name to search"),
+    name: Optional[str] = typer.Argument(None, help="Symbol name to search"),
     kind: Optional[str] = typer.Option(None, help="Symbol kind (class, function, etc.)"),
     limit: int = typer.Option(100, help="Max results"),
     json: bool = typer.Option(False, "--json", help="JSON output"),
