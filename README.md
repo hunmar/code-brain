@@ -44,12 +44,28 @@ Unified code intelligence for LLM agents. Combines structural AST indexing ([ast
 
 ## Quick Start
 
+Get structural queries working in under a minute:
+
+```bash
+# Install
+pip install code-brain  # or: uv add code-brain
+
+# Index your project
+cd /your/project
+ast-index rebuild       # or: code-brain ingest (auto-runs ast-index)
+
+# Query
+code-brain find UserService
+code-brain outline src/main.py
+code-brain doctor                  # Check what's working
+```
+
 ### Prerequisites
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - [ast-index](https://github.com/nickarash/ast-index) CLI installed
-- Docker (for Neo4j + Qdrant)
+- Docker (for Neo4j + Qdrant — only needed for semantic queries)
 
 ### Installation
 
@@ -119,6 +135,31 @@ Code Brain exposes 12 tools via the [Model Context Protocol](https://modelcontex
 | `code_map` | Get a PageRank-ranked overview of important symbols |
 | `code_hotspots` | Find frequently-changed code areas |
 | `code_architecture` | Generate an architecture diagram |
+
+### Tool Tiers
+
+Not all tools require the full stack. Here is what each tier needs:
+
+| Tier | Tools | Requirements |
+|------|-------|-------------|
+| Structural (works immediately) | `code_find_symbol`, `code_hierarchy`, `code_usages`, `code_outline`, `code_dependencies` | Just `ast-index rebuild` |
+| Graph-powered | `code_map`, `code_architecture`, `code_hotspots`, `code_impact`, `code_review_diff` | `code-brain ingest` |
+| Semantic | `code_ask`, `code_explain` | `code-brain up` + `code-brain ingest` |
+
+### Claude Code Setup
+
+Add a `.mcp.json` file at user scope (`~/.claude/.mcp.json`) or project scope (`.mcp.json` in the project root):
+
+```json
+{
+  "mcpServers": {
+    "code-brain": {
+      "command": "/path/to/code-brain/.venv/bin/code-brain",
+      "args": ["serve", "--project", "/path/to/your/project"]
+    }
+  }
+}
+```
 
 ### Claude Desktop Configuration
 
