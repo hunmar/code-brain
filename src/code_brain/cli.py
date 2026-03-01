@@ -114,6 +114,110 @@ def status(project: Optional[str] = typer.Option(None, help="Project root")):
 
 
 @app.command()
+def doctor(
+    project: Optional[str] = typer.Option(None, help="Project root"),
+):
+    """Check system health and diagnose setup issues."""
+    import shutil
+
+    root = None
+    if project:
+        root = Path(project)
+    else:
+        env_project = os.environ.get("CODE_BRAIN_PROJECT")
+        if env_project:
+            root = Path(env_project)
+        else:
+            root = find_project_root(Path.cwd())
+
+    typer.echo("Code Brain Doctor")
+    typer.echo("=" * 40)
+
+    # 1. Project
+    if root and (root / ".code-brain").is_dir():
+        typer.echo(f"  Project:          OK ({root})")
+        cfg = CodeBrainConfig(project_root=root)
+    else:
+        typer.echo("  Project:          NOT INITIALIZED")
+        typer.echo("    Run: code-brain init <path>")
+        cfg = None
+
+    # 2. ast-index binary
+    from code_brain.ingestion.ast_index import _find_ast_index_bin
+    ast_bin = _find_ast_index_bin()
+    ast_found = shutil.which(ast_bin) is not None or Path(ast_bin).is_file()
+    if ast_found:
+        typer.echo(f"  ast-index binary: OK ({ast_bin})")
+    else:
+        typer.echo("  ast-index binary: NOT FOUND")
+        typer.echo("    Install: cargo install --git https://github.com/nickarash/ast-index ast-index")
+
+    # 3. ast-index DB
+    if cfg:
+        from code_brain.ingestion.ast_index import ASTIndexReader
+        reader = ASTIndexReader(cfg.project_root)
+        if reader.is_available():
+            try:
+                count = len(reader.get_symbols())
+                typer.echo(f"  AST index DB:     OK ({count} symbols)")
+                reader.close()
+            except Exception as e:
+                typer.echo(f"  AST index DB:     ERROR ({e})")
+        else:
+            typer.echo("  AST index DB:     NOT FOUND")
+            typer.echo("    Run: code-brain ingest")
+    else:
+        typer.echo("  AST index DB:     SKIPPED (no project)")
+
+    # 4. Graph
+    if cfg and cfg.graph_path.is_file():
+        try:
+            from code_brain.graph.builder import GraphBuilder
+            graph = GraphBuilder().load(cfg.graph_path)
+            typer.echo(f"  Graph:            OK ({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)")
+        except Exception as e:
+            typer.echo(f"  Graph:            ERROR ({e})")
+    elif cfg:
+        typer.echo("  Graph:            NOT FOUND")
+        typer.echo("    Run: code-brain ingest")
+    else:
+        typer.echo("  Graph:            SKIPPED (no project)")
+
+    # 5. Docker
+    docker_found = shutil.which("docker") is not None
+    if docker_found:
+        typer.echo("  Docker:           OK")
+    else:
+        typer.echo("  Docker:           NOT FOUND")
+        typer.echo("    Required for semantic features (Neo4j + Qdrant)")
+
+    # 6. Neo4j
+    if cfg:
+        try:
+            import urllib.request
+            url = cfg.neo4j_uri.replace("bolt://", "http://").replace(":7687", ":7474")
+            urllib.request.urlopen(url, timeout=3)
+            typer.echo(f"  Neo4j:            OK ({cfg.neo4j_uri})")
+        except Exception:
+            typer.echo(f"  Neo4j:            NOT REACHABLE ({cfg.neo4j_uri})")
+            typer.echo("    Run: code-brain up")
+    else:
+        typer.echo("  Neo4j:            SKIPPED (no project)")
+
+    # 7. Qdrant
+    if cfg:
+        try:
+            import urllib.request
+            urllib.request.urlopen(cfg.qdrant_url, timeout=3)
+            typer.echo(f"  Qdrant:           OK ({cfg.qdrant_url})")
+        except Exception:
+            typer.echo(f"  Qdrant:           NOT REACHABLE ({cfg.qdrant_url})")
+            typer.echo("    Run: code-brain up")
+    else:
+        typer.echo("  Qdrant:           SKIPPED (no project)")
+
+
+@app.command()
 def ingest(
     project: Optional[str] = typer.Option(None, help="Project root"),
     skip_semantic: bool = typer.Option(False, "--skip-semantic", help="Skip semantic ingestion"),

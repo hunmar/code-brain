@@ -89,3 +89,26 @@ def test_ingest_ast_index_not_found_shows_install_help(tmp_path, monkeypatch):
 
     assert "ast-index not installed" in result.stdout
     assert "cargo install" in result.stdout
+
+
+def test_doctor_command_runs(tmp_path, monkeypatch):
+    """doctor should report status without crashing."""
+    monkeypatch.setenv("CODE_BRAIN_PROJECT", str(tmp_path))
+    (tmp_path / ".code-brain").mkdir()
+
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "Code Brain Doctor" in result.stdout
+
+
+def test_doctor_shows_all_checks(tmp_path, monkeypatch):
+    """doctor should check ast-index, graph, docker."""
+    monkeypatch.setenv("CODE_BRAIN_PROJECT", str(tmp_path))
+    (tmp_path / ".code-brain").mkdir()
+
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    output = result.stdout.lower()
+    assert "ast-index" in output
+    assert "graph" in output
+    assert "docker" in output
