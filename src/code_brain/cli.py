@@ -60,6 +60,16 @@ def init(path: str = typer.Argument(".", help="Project root path")):
 @app.command()
 def up(project: Optional[str] = typer.Option(None, help="Project root")):
     """Start backend services (Neo4j, Qdrant) via docker compose."""
+    import shutil
+
+    if not shutil.which("docker"):
+        typer.echo(
+            "Error: Docker not found.\n"
+            "  Install Docker: https://docs.docker.com/get-docker/\n"
+            "  Or use --skip-semantic with ingest to skip semantic features."
+        )
+        raise typer.Exit(1)
+
     cfg = _get_config(project)
     compose_file = cfg.code_brain_dir / "docker-compose.yml"
     if not compose_file.is_file():
@@ -532,7 +542,11 @@ def _get_structural_engine(cfg: CodeBrainConfig):
 
     reader = ASTIndexReader(cfg.project_root)
     if not reader.is_available():
-        typer.echo("Error: AST index not found. Run ast-index first.")
+        typer.echo(
+            "Error: AST index not found.\n"
+            "  Run: code-brain ingest\n"
+            "  Or check: code-brain doctor"
+        )
         raise typer.Exit(1)
     return StructuralQueryEngine(reader, project_root=cfg.project_root)
 
@@ -549,7 +563,11 @@ def _load_graph(cfg: CodeBrainConfig):
     from code_brain.graph.builder import GraphBuilder
 
     if not cfg.graph_path.is_file():
-        typer.echo("Error: graph not found. Run 'code-brain ingest' first.")
+        typer.echo(
+            "Error: Code graph not found.\n"
+            "  Run: code-brain ingest\n"
+            "  Or check: code-brain doctor"
+        )
         raise typer.Exit(1)
     return GraphBuilder().load(cfg.graph_path)
 

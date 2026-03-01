@@ -112,3 +112,12 @@ def test_doctor_shows_all_checks(tmp_path, monkeypatch):
     assert "ast-index" in output
     assert "graph" in output
     assert "docker" in output
+
+
+def test_error_message_mentions_ingest(tmp_path, monkeypatch):
+    """When AST index missing, error should mention 'ingest'."""
+    monkeypatch.setenv("CODE_BRAIN_PROJECT", str(tmp_path))
+    (tmp_path / ".code-brain").mkdir()
+
+    result = runner.invoke(app, ["find", "Foo"])
+    assert "ingest" in result.stdout.lower()
