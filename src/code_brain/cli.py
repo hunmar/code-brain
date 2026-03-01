@@ -66,7 +66,7 @@ def up(project: Optional[str] = typer.Option(None, help="Project root")):
         typer.echo(
             "Error: Docker not found.\n"
             "  Install Docker: https://docs.docker.com/get-docker/\n"
-            "  Or use --skip-semantic with ingest to skip semantic features."
+            "  Or use --structural-only with ingest to skip semantic features."
         )
         raise typer.Exit(1)
 
@@ -227,13 +227,29 @@ def doctor(
         typer.echo("  Qdrant:           SKIPPED (no project)")
 
 
+def _ingest_semantic_callback(ctx: typer.Context, param: typer.CallbackParam, value: bool) -> bool:
+    """Handle deprecated --skip-semantic flag."""
+    if param.name == "skip_semantic" and value:
+        typer.echo(
+            "Warning: --skip-semantic is deprecated. Use --structural-only instead.",
+            err=True,
+        )
+    return value
+
+
 @app.command()
 def ingest(
     project: Optional[str] = typer.Option(None, help="Project root"),
-    skip_semantic: bool = typer.Option(False, "--skip-semantic", help="Skip semantic ingestion"),
+    structural_only: bool = typer.Option(False, "--structural-only", help="Skip semantic ingestion"),
+    skip_semantic: bool = typer.Option(
+        False, "--skip-semantic", hidden=True,
+        callback=_ingest_semantic_callback,
+        help="(Deprecated) Use --structural-only",
+    ),
     rebuild: bool = typer.Option(False, "--rebuild", help="Force ast-index rebuild"),
 ):
     """Build the code graph and ingest into backends."""
+    no_semantic = structural_only or skip_semantic
     cfg = _get_config(project)
     cfg.ensure_dirs()
 
@@ -319,19 +335,27 @@ def ingest(
     builder.save(graph, cfg.graph_path)
     typer.echo(f"Graph saved: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
-    if not skip_semantic:
+    if not no_semantic:
         typer.echo("Ingesting into semantic store...")
         from code_brain.ingestion.cognee_adapter import CogneeAdapter
         from code_brain.ingestion.doc_ingester import find_docs
 
         adapter = CogneeAdapter()
+
+        # Batched ingestion
         asyncio.run(adapter.ingest_symbols(symbols))
         asyncio.run(adapter.ingest_module_deps(all_deps))
-
         docs = find_docs(cfg.project_root)
         if docs:
             asyncio.run(adapter.ingest_docs(docs))
             typer.echo(f"Ingested {len(docs)} documents.")
+
+        # Single finalize step
+        typer.echo("Finalizing semantic store (cognify + memify)...")
+        try:
+            asyncio.run(adapter.finalize())
+        except Exception as exc:
+            typer.echo(f"Warning: semantic finalization failed: {exc}", err=True)
 
     typer.echo("Ingestion complete.")
     reader.close()
@@ -429,14 +453,11 @@ def ask(
     """Ask a semantic question about the codebase."""
     cfg = _get_config(project)
     engine = _get_semantic_engine(cfg)
-    results = asyncio.run(engine.ask(question))
+    result = asyncio.run(engine.ask(question))
     if json:
-        typer.echo(json_fmt.format(results))
+        typer.echo(json_fmt.format(result))
     else:
-        for item in results:
-            typer.echo(f"  {item.get('text', str(item))}")
-        if not results:
-            typer.echo("No results found.")
+        _print_semantic_response(result)
 
 
 @app.command()
@@ -449,14 +470,11 @@ def search(
     """Fast semantic search by concept."""
     cfg = _get_config(project)
     engine = _get_semantic_engine(cfg)
-    results = asyncio.run(engine.search_fast(query, top_k=top_k))
+    result = asyncio.run(engine.search_fast(query, top_k=top_k))
     if json:
-        typer.echo(json_fmt.format(results))
+        typer.echo(json_fmt.format(result))
     else:
-        for item in results:
-            typer.echo(f"  {item.get('text', str(item))}")
-        if not results:
-            typer.echo("No results found.")
+        _print_semantic_response(result)
 
 
 @app.command()
@@ -468,14 +486,11 @@ def reason(
     """Run deeper reasoning over code graph semantics."""
     cfg = _get_config(project)
     engine = _get_semantic_engine(cfg)
-    results = asyncio.run(engine.reason(question))
+    result = asyncio.run(engine.reason(question))
     if json:
-        typer.echo(json_fmt.format(results))
+        typer.echo(json_fmt.format(result))
     else:
-        for item in results:
-            typer.echo(f"  {item.get('text', str(item))}")
-        if not results:
-            typer.echo("No results found.")
+        _print_semantic_response(result)
 
 
 @app.command(name="map")
@@ -572,7 +587,45 @@ def serve(
     asyncio.run(run_server(cfg))
 
 
+@app.command(name="dashboard")
+def dashboard(
+    host: str = typer.Option("127.0.0.1", help="Dashboard host"),
+    port: int = typer.Option(8765, help="Dashboard port"),
+    project: Optional[str] = typer.Option(None, help="Project root"),
+):
+    """Start the local MCP activity dashboard."""
+    cfg = _get_config(project)
+    cfg.ensure_dirs()
+
+    from code_brain.ui_server import run_dashboard_server
+
+    typer.echo(f"Dashboard running at http://{host}:{port}")
+    typer.echo(f"Reading events from: {cfg.events_path}")
+    run_dashboard_server(cfg.events_path, host=host, port=port)
+
+
 # ── helpers ──────────────────────────────────────────────────────────────
+
+
+def _print_semantic_response(response: dict) -> None:
+    """Pretty-print a semantic response contract dict."""
+    answer = response.get("answer", "")
+    if answer:
+        typer.echo(answer)
+    else:
+        typer.echo("No results found.")
+
+    evidence = response.get("evidence", [])
+    if evidence:
+        typer.echo(f"\nEvidence ({response.get('confidence', '?')} confidence):")
+        for e in evidence:
+            loc = f"{e.get('file_path', '?')}:{e.get('line', '?')}"
+            sym = e.get("symbol", "")
+            typer.echo(f"  {sym + ' at ' if sym else ''}{loc}")
+
+    warnings = response.get("warnings", [])
+    for w in warnings:
+        typer.echo(f"Warning: {w}", err=True)
 
 
 def _get_structural_engine(cfg: CodeBrainConfig):

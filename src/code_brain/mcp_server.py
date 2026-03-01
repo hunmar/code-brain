@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Awaitable
 
 import networkx as nx
@@ -17,6 +18,7 @@ from code_brain.ingestion.cognee_adapter import CogneeAdapter
 from code_brain.query.hybrid import HybridQueryEngine
 from code_brain.query.semantic import SemanticQueryEngine
 from code_brain.query.structural import StructuralQueryEngine
+from code_brain.telemetry import log_tool_event
 
 TOOL_NAMES = [
     "code_find_symbol",
@@ -238,11 +240,22 @@ async def _safe_semantic_call(coro: Awaitable[dict | list | str]) -> dict | list
         details = str(exc)
         if _is_semantic_backend_error(details):
             return {
-                "error": "Semantic features are currently unavailable.",
-                "hint": "Run: code-brain up && code-brain ingest",
-                "details": details,
+                "answer": "Semantic features are currently unavailable.",
+                "evidence": [],
+                "confidence": "low",
+                "degraded": True,
+                "warnings": [
+                    "Run: code-brain up && code-brain ingest",
+                    details,
+                ],
             }
-        return {"error": f"Semantic query failed: {details}"}
+        return {
+            "answer": "",
+            "evidence": [],
+            "confidence": "low",
+            "degraded": True,
+            "warnings": [f"Semantic query failed: {details}"],
+        }
 
 
 def create_server(config: CodeBrainConfig) -> Server:
@@ -263,13 +276,23 @@ def create_server(config: CodeBrainConfig) -> Server:
 
     @server.call_tool()
     async def handle_call_tool(name: str, arguments: dict | None) -> list[TextContent]:
+        args = arguments or {}
+        start = time.perf_counter()
         result = await _dispatch(
             name,
-            arguments or {},
+            args,
             structural,
             semantic,
             hybrid,
             graph_engine,
+        )
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        log_tool_event(
+            config.events_path,
+            tool=name,
+            arguments=args,
+            result=result,
+            duration_ms=duration_ms,
         )
         text = json.dumps(result, indent=2) if isinstance(result, (dict, list)) else str(result)
         return [TextContent(type="text", text=text)]

@@ -40,6 +40,7 @@ Unified code intelligence for LLM agents. Combines structural AST indexing ([ast
 - **Hot spots** — identify frequently-changed areas from git history
 - **Architecture diagrams** — auto-generated module dependency diagrams (Mermaid or text)
 - **MCP server** — 14 tools for Claude and other LLM agents
+- **Local dashboard** — visualize MCP tool calls, latency, and errors in real time
 - **Token budgeting** — compact/medium/full output depth based on context window limits
 
 ## Quick Start
@@ -117,6 +118,9 @@ code-brain doctor                  # Check what's installed and working
 
 # Start MCP server for Claude
 code-brain serve
+
+# Visualize MCP tool activity
+code-brain dashboard
 ```
 
 ## MCP Server
@@ -180,6 +184,40 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
+### Semantic Response Contract
+
+Semantic tools (`code_ask`, `code_explain`, `code_search`, `code_reason`) return a consistent response shape:
+
+```json
+{
+  "answer": "AuthService manages session lifecycle",
+  "evidence": [
+    {"symbol": "AuthService", "file_path": "services/auth.py", "line": 3}
+  ],
+  "confidence": "medium",
+  "degraded": false,
+  "warnings": []
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `answer` | Synthesized answer text |
+| `evidence` | Structural anchors (symbol, file_path, line) extracted from results |
+| `confidence` | `high` (2+ anchors), `medium` (1 anchor), `low` (no anchors) |
+| `degraded` | `true` when semantic backends are unavailable |
+| `warnings` | Recovery hints or error details when degraded |
+
+When backends are down, semantic tools return `degraded: true` with actionable recovery hints instead of crashing. Structural tools are unaffected.
+
+### Structural-Only Mode
+
+Use `--structural-only` to skip semantic ingestion (useful when backends are unavailable):
+
+```bash
+code-brain ingest --structural-only
+```
+
 ## Infrastructure
 
 Code Brain uses Docker Compose for backend services:
@@ -199,11 +237,14 @@ Services:
 src/code_brain/
 ├── cli.py                  # Typer CLI entrypoint and commands
 ├── config.py               # Project config with env var overrides
+├── models.py               # Code data models (DataPoint subclasses for cognee)
 ├── mcp_server.py           # MCP server with 14 tools
+├── ui_server.py            # Local MCP activity dashboard server
+├── telemetry.py            # MCP event logging + metrics helpers
 ├── ingestion/
 │   ├── ast_index.py        # Read-only SQLite reader for ast-index
 │   ├── git_analyzer.py     # Git history analysis (hot spots, co-changes)
-│   ├── cognee_adapter.py   # cognee ingestion adapter
+│   ├── cognee_adapter.py   # Batched cognee ingestion adapter
 │   └── doc_ingester.py     # Markdown documentation finder
 ├── graph/
 │   ├── builder.py          # Unified NetworkX graph builder
@@ -213,7 +254,7 @@ src/code_brain/
 │   ├── router.py           # Command → query type classification
 │   ├── budgeter.py         # Token budget management
 │   ├── structural.py       # AST-based structural queries
-│   ├── semantic.py         # cognee-powered semantic queries
+│   ├── semantic.py         # cognee-powered semantic queries (evidence + confidence)
 │   └── hybrid.py           # Combined analysis (impact, dead code)
 └── formatters/
     ├── json_formatter.py   # JSON output

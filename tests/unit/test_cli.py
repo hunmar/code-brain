@@ -58,6 +58,13 @@ def test_serve_command_exists():
     assert "MCP" in result.stdout or "server" in result.stdout.lower()
 
 
+def test_dashboard_command_exists():
+    """Verify dashboard command is registered and help works."""
+    result = runner.invoke(app, ["dashboard", "--help"])
+    assert result.exit_code == 0
+    assert "dashboard" in result.stdout.lower()
+
+
 def test_search_command_exists():
     """Verify search command is registered and help works."""
     result = runner.invoke(app, ["search", "--help"])
@@ -77,7 +84,11 @@ def test_search_calls_semantic_engine():
     from unittest.mock import patch, MagicMock, AsyncMock
 
     mock_engine = MagicMock()
-    mock_engine.search_fast = AsyncMock(return_value=[{"text": "auth result"}])
+    mock_engine.search_fast = AsyncMock(return_value={
+        "answer": "auth result",
+        "evidence": [], "confidence": "low",
+        "degraded": False, "warnings": [],
+    })
 
     with patch("code_brain.cli._get_semantic_engine", return_value=mock_engine):
         result = runner.invoke(app, ["search", "authentication", "--top-k", "3"])
@@ -91,7 +102,11 @@ def test_reason_calls_semantic_engine():
     from unittest.mock import patch, MagicMock, AsyncMock
 
     mock_engine = MagicMock()
-    mock_engine.reason = AsyncMock(return_value=[{"text": "Because boundaries are shared"}])
+    mock_engine.reason = AsyncMock(return_value={
+        "answer": "Because boundaries are shared",
+        "evidence": [], "confidence": "low",
+        "degraded": False, "warnings": [],
+    })
 
     with patch("code_brain.cli._get_semantic_engine", return_value=mock_engine):
         result = runner.invoke(app, ["reason", "Why does auth depend on users?"])
@@ -163,3 +178,51 @@ def test_error_message_mentions_ingest(tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["find", "Foo"])
     assert "ingest" in result.stdout.lower()
+
+
+def test_ingest_help_shows_structural_only():
+    """Help output should show --structural-only."""
+    result = runner.invoke(app, ["ingest", "--help"])
+    assert result.exit_code == 0
+    assert "--structural-only" in result.stdout
+
+
+def test_ingest_skip_semantic_shows_deprecation(tmp_path, monkeypatch):
+    """Legacy --skip-semantic should trigger a deprecation warning."""
+    from unittest.mock import patch, MagicMock
+
+    (tmp_path / ".code-brain").mkdir()
+    monkeypatch.setenv("CODE_BRAIN_PROJECT", str(tmp_path))
+
+    mock_run = MagicMock()
+    mock_run.return_value.returncode = 1
+
+    with patch("subprocess.run", mock_run):
+        result = runner.invoke(app, ["ingest", "--skip-semantic"])
+
+    # Should show deprecation warning on stderr (captured in output)
+    combined = result.stdout + (result.stderr or "")
+    assert "deprecated" in combined.lower() or "structural-only" in combined.lower()
+
+
+def test_semantic_response_shows_evidence():
+    """ask should display evidence when present."""
+    from unittest.mock import patch, MagicMock, AsyncMock
+
+    mock_engine = MagicMock()
+    mock_engine.ask = AsyncMock(return_value={
+        "answer": "AuthService handles login",
+        "evidence": [
+            {"symbol": "AuthService", "file_path": "services/auth.py", "line": 3},
+        ],
+        "confidence": "medium",
+        "degraded": False,
+        "warnings": [],
+    })
+
+    with patch("code_brain.cli._get_semantic_engine", return_value=mock_engine):
+        result = runner.invoke(app, ["ask", "What does AuthService do?"])
+
+    assert result.exit_code == 0
+    assert "AuthService handles login" in result.stdout
+    assert "services/auth.py" in result.stdout
