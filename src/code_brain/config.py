@@ -1,61 +1,44 @@
-"""Project configuration with environment variable overrides."""
-
-from __future__ import annotations
-
+# code-brain/src/code_brain/config.py
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_DEFAULT_NEO4J_URI = "bolt://localhost:7687"
-_DEFAULT_NEO4J_USER = "neo4j"
-_DEFAULT_NEO4J_PASSWORD = "codebrain"
-_DEFAULT_QDRANT_URL = "http://localhost:6333"
-_DEFAULT_TOKEN_BUDGET = 10_000
+
+def find_project_root(start: Path) -> Path | None:
+    current = start.resolve()
+    while current != current.parent:
+        if (current / ".code-brain").is_dir():
+            return current
+        if (current / ".git").is_dir():
+            return current
+        current = current.parent
+    return None
 
 
-def _default_ast_db(repo_root: Path) -> Path:
-    return repo_root / ".code_brain" / "ast.db"
+@dataclass
+class CodeBrainConfig:
+    project_root: Path
 
-
-@dataclass(frozen=True)
-class ProjectConfig:
-    """Immutable project configuration.
-
-    Construct directly for full control, or use ``from_repo()``
-    to pick up ``CODE_BRAIN_*`` environment-variable overrides.
-    """
-
-    repo_root: Path
-    ast_db_path: Path | None = None
-    neo4j_uri: str = _DEFAULT_NEO4J_URI
-    neo4j_user: str = _DEFAULT_NEO4J_USER
-    neo4j_password: str = _DEFAULT_NEO4J_PASSWORD
-    qdrant_url: str = _DEFAULT_QDRANT_URL
-    token_budget: int = _DEFAULT_TOKEN_BUDGET
-
-    def __post_init__(self) -> None:
-        if self.ast_db_path is None:
-            object.__setattr__(self, "ast_db_path", _default_ast_db(self.repo_root))
+    neo4j_uri: str = field(default_factory=lambda: os.environ.get(
+        "CODE_BRAIN_NEO4J_URI", "bolt://localhost:7687"))
+    neo4j_user: str = field(default_factory=lambda: os.environ.get(
+        "CODE_BRAIN_NEO4J_USER", "neo4j"))
+    neo4j_password: str = field(default_factory=lambda: os.environ.get(
+        "CODE_BRAIN_NEO4J_PASSWORD", "codebrain"))
+    qdrant_url: str = field(default_factory=lambda: os.environ.get(
+        "CODE_BRAIN_QDRANT_URL", "http://localhost:6333"))
 
     @property
-    def data_dir(self) -> Path:
-        return self.repo_root / ".code_brain"
+    def code_brain_dir(self) -> Path:
+        return self.project_root / ".code-brain"
 
-    @classmethod
-    def from_repo(cls, repo_root: Path) -> ProjectConfig:
-        """Create config from a repo path, reading CODE_BRAIN_* env vars."""
-        neo4j_uri = os.environ.get("CODE_BRAIN_NEO4J_URI", _DEFAULT_NEO4J_URI)
-        neo4j_user = os.environ.get("CODE_BRAIN_NEO4J_USER", _DEFAULT_NEO4J_USER)
-        neo4j_password = os.environ.get("CODE_BRAIN_NEO4J_PASSWORD", _DEFAULT_NEO4J_PASSWORD)
-        qdrant_url = os.environ.get("CODE_BRAIN_QDRANT_URL", _DEFAULT_QDRANT_URL)
-        token_budget_str = os.environ.get("CODE_BRAIN_TOKEN_BUDGET")
-        token_budget = int(token_budget_str) if token_budget_str else _DEFAULT_TOKEN_BUDGET
+    @property
+    def graph_path(self) -> Path:
+        return self.code_brain_dir / "graph.pkl"
 
-        return cls(
-            repo_root=repo_root,
-            neo4j_uri=neo4j_uri,
-            neo4j_user=neo4j_user,
-            neo4j_password=neo4j_password,
-            qdrant_url=qdrant_url,
-            token_budget=token_budget,
-        )
+    @property
+    def ast_index_db_path(self) -> Path:
+        return self.project_root / ".ast-index" / "db.sqlite3"
+
+    def ensure_dirs(self) -> None:
+        self.code_brain_dir.mkdir(parents=True, exist_ok=True)
