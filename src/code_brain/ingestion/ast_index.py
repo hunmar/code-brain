@@ -1,5 +1,6 @@
 # code-brain/src/code_brain/ingestion/ast_index.py
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,9 +30,44 @@ class ModuleDep:
     kind: str
 
 
+def _find_ast_index_bin() -> str:
+    """Find the ast-index binary, checking common install locations."""
+    import shutil
+    found = shutil.which("ast-index")
+    if found:
+        return found
+    # Check common cargo install location
+    cargo_bin = Path.home() / ".cargo" / "bin" / "ast-index"
+    if cargo_bin.is_file():
+        return str(cargo_bin)
+    return "ast-index"
+
+
+def _discover_db_path(project_root: Path) -> Path:
+    """Find the ast-index database, trying `ast-index db-path` first, then local fallback."""
+    ast_bin = _find_ast_index_bin()
+    try:
+        result = subprocess.run(
+            [ast_bin, "db-path"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            db = Path(result.stdout.strip())
+            if db.is_file():
+                return db
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    # Fallback: check local .ast-index directory
+    return project_root / ".ast-index" / "db.sqlite3"
+
+
 class ASTIndexReader:
     def __init__(self, project_root: Path):
-        self._db_path = project_root / ".ast-index" / "db.sqlite3"
+        self._project_root = project_root
+        self._db_path = _discover_db_path(project_root)
         self._conn: sqlite3.Connection | None = None
 
     def is_available(self) -> bool:
