@@ -1,83 +1,59 @@
-"""PageRank-based relevance scoring for code graphs."""
-from __future__ import annotations
-
+# code-brain/src/code_brain/graph/pagerank.py
 from dataclasses import dataclass
-from typing import Any
 
 import networkx as nx
 
 
 @dataclass(frozen=True)
-class ScoredNode:
-    """A graph node with its PageRank score."""
-
-    node_id: str
+class RankedNode:
+    node_id: int | str
     score: float
-    node_data: dict[str, Any]
+    name: str
+    kind: str
+    file_path: str
+    line: int
 
 
 class PageRankScorer:
-    """Scores code graph nodes using personalized PageRank.
+    def __init__(self, graph: nx.DiGraph):
+        self._graph = graph
 
-    Wraps networkx.pagerank with support for personalization vectors,
-    node-type filtering, and top-N retrieval.
-    """
-
-    def __init__(
+    def rank(
         self,
+        focus_nodes: list[int | str] | None = None,
         alpha: float = 0.85,
-        max_iter: int = 100,
-        tol: float = 1e-6,
-    ):
-        self.alpha = alpha
-        self.max_iter = max_iter
-        self.tol = tol
+        limit: int | None = None,
+    ) -> list[RankedNode]:
+        personalization = None
+        if focus_nodes:
+            personalization = {n: 0.0 for n in self._graph.nodes}
+            for node in focus_nodes:
+                if node in personalization:
+                    personalization[node] = 1.0 / len(focus_nodes)
 
-    def score(
-        self,
-        graph: nx.DiGraph,
-        personalization: dict[str, float] | None = None,
-    ) -> list[ScoredNode]:
-        """Run PageRank on the graph and return scored nodes sorted by score descending."""
-        if len(graph) == 0:
-            return []
+        try:
+            scores = nx.pagerank(
+                self._graph,
+                alpha=alpha,
+                personalization=personalization,
+            )
+        except nx.PowerIterationFailedConvergence:
+            scores = {n: 1.0 / len(self._graph) for n in self._graph.nodes}
 
-        scores = nx.pagerank(
-            graph,
-            alpha=self.alpha,
-            personalization=personalization,
-            max_iter=self.max_iter,
-            tol=self.tol,
-        )
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
-        return sorted(
-            [
-                ScoredNode(
-                    node_id=node_id,
-                    score=score,
-                    node_data=dict(graph.nodes[node_id]),
-                )
-                for node_id, score in scores.items()
-            ],
-            key=lambda n: n.score,
-            reverse=True,
-        )
+        result = []
+        for node_id, score in ranked:
+            data = self._graph.nodes.get(node_id, {})
+            result.append(RankedNode(
+                node_id=node_id,
+                score=score,
+                name=data.get("name", ""),
+                kind=data.get("kind", ""),
+                file_path=data.get("file_path", ""),
+                line=data.get("line", 0),
+            ))
 
-    def score_filtered(
-        self,
-        graph: nx.DiGraph,
-        node_type: str,
-        personalization: dict[str, float] | None = None,
-    ) -> list[ScoredNode]:
-        """Run PageRank and return only nodes matching the given type."""
-        all_scored = self.score(graph, personalization)
-        return [n for n in all_scored if n.node_data.get("type") == node_type]
-
-    def top_n(
-        self,
-        graph: nx.DiGraph,
-        n: int,
-        personalization: dict[str, float] | None = None,
-    ) -> list[ScoredNode]:
-        """Return the top N nodes by PageRank score."""
-        return self.score(graph, personalization)[:n]
+        if limit:
+            result = result[:limit]
+        return result
