@@ -43,3 +43,16 @@ def test_find_no_args_lists_all():
         result = runner.invoke(app, ["find"])
     assert result.exit_code == 0
     mock_engine.find.assert_called_once_with(name=None, kind=None, limit=100)
+
+
+def test_serve_import_works():
+    """Verify the serve command can import run_server without error."""
+    from code_brain.mcp_server import run_server
+    assert callable(run_server)
+
+
+def test_serve_command_exists():
+    """Verify serve command is registered and help works."""
+    result = runner.invoke(app, ["serve", "--help"])
+    assert result.exit_code == 0
+    assert "MCP" in result.stdout or "server" in result.stdout.lower()

@@ -381,18 +381,13 @@ def impact(
 
 @app.command()
 def serve(
-    host: str = typer.Option("127.0.0.1", help="Host to bind"),
-    port: int = typer.Option(8000, help="Port to bind"),
     project: Optional[str] = typer.Option(None, help="Project root"),
 ):
-    """Start the MCP server."""
-    _get_config(project)  # validate project exists
-    try:
-        from code_brain.mcp_server import serve as mcp_serve
-    except ImportError:
-        typer.echo("Error: MCP server module not available.")
-        raise typer.Exit(1)
-    asyncio.run(mcp_serve(host=host, port=port))
+    """Start the MCP server (stdio transport)."""
+    cfg = _get_config(project)
+    from code_brain.mcp_server import run_server
+
+    asyncio.run(run_server(cfg))
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
