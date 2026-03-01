@@ -1,50 +1,30 @@
-"""Plain-text formatter for code-brain query results."""
-
-from __future__ import annotations
-
-from code_brain.models import QueryResult
-
-
 class TextFormatter:
-    """Formats a QueryResult as human-readable plain text."""
+    def format_symbols(self, symbols: list[dict]) -> str:
+        lines = []
+        for s in symbols:
+            loc = f"{s['file_path']}:{s['line']}"
+            sig = s.get("signature", "")
+            lines.append(f"  {s['kind']} {s['name']}  ({loc})")
+            if sig:
+                lines.append(f"    {sig}")
+        return "\n".join(lines) if lines else "No results found."
 
-    def __init__(
-        self,
-        max_snippet_lines: int = 10,
-        show_scores: bool = True,
-    ) -> None:
-        self.max_snippet_lines = max_snippet_lines
-        self.show_scores = show_scores
+    def format_hierarchy(self, hierarchy: dict) -> str:
+        cls = hierarchy["class"]
+        parents = hierarchy.get("parents", [])
+        if not parents:
+            return f"{cls} (no parents)"
+        tree = " <- ".join([cls] + parents)
+        return tree
 
-    def format(self, result: QueryResult) -> str:
-        lines: list[str] = []
-        lines.append(f"Query: {result.query}")
-        lines.append(f"Found {result.total_count} result(s)")
+    def format_usages(self, usages: list[dict]) -> str:
+        lines = []
+        for u in usages:
+            lines.append(f"  {u['file_path']}:{u['line']}  {u.get('context', '')}")
+        return "\n".join(lines) if lines else "No usages found."
 
-        if result.elapsed_ms is not None:
-            lines.append(f"Time: {result.elapsed_ms:.1f}ms")
-
-        lines.append("")
-
-        for i, item in enumerate(result.items, 1):
-            header = f"{i}. [{item.kind}] {item.symbol}"
-            if self.show_scores:
-                header += f" (score: {item.score:.2f})"
-            lines.append(header)
-
-            location = f"   {item.file_path}"
-            if item.line_number is not None:
-                location += f":{item.line_number}"
-            lines.append(location)
-
-            if item.snippet:
-                snippet_lines = item.snippet.splitlines()
-                if len(snippet_lines) > self.max_snippet_lines:
-                    snippet_lines = snippet_lines[: self.max_snippet_lines]
-                    snippet_lines.append("...")
-                for sl in snippet_lines:
-                    lines.append(f"   {sl}")
-
-            lines.append("")
-
-        return "\n".join(lines)
+    def format_deps(self, deps: list[dict]) -> str:
+        lines = []
+        for d in deps:
+            lines.append(f"  {d['source']} -> {d['target']} ({d['kind']})")
+        return "\n".join(lines) if lines else "No dependencies found."
