@@ -117,18 +117,47 @@ def status(project: Optional[str] = typer.Option(None, help="Project root")):
 def ingest(
     project: Optional[str] = typer.Option(None, help="Project root"),
     skip_semantic: bool = typer.Option(False, "--skip-semantic", help="Skip semantic ingestion"),
+    rebuild: bool = typer.Option(False, "--rebuild", help="Force ast-index rebuild"),
 ):
     """Build the code graph and ingest into backends."""
     cfg = _get_config(project)
     cfg.ensure_dirs()
 
-    from code_brain.ingestion.ast_index import ASTIndexReader
+    from code_brain.ingestion.ast_index import ASTIndexReader, _find_ast_index_bin
     from code_brain.ingestion.git_analyzer import GitAnalyzer
     from code_brain.graph.builder import GraphBuilder
 
     reader = ASTIndexReader(cfg.project_root)
+
+    # Auto-run ast-index rebuild if DB missing or --rebuild flag
+    if rebuild or not reader.is_available():
+        ast_bin = _find_ast_index_bin()
+        typer.echo(f"Running ast-index rebuild (binary: {ast_bin})...")
+        try:
+            result = subprocess.run(
+                [ast_bin, "rebuild"],
+                cwd=cfg.project_root,
+                check=False,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                typer.echo("Warning: ast-index rebuild failed. Continuing with existing index if available.")
+        except FileNotFoundError:
+            typer.echo(
+                "Error: ast-index not installed.\n"
+                "  Install via: cargo install --git https://github.com/nickarash/ast-index ast-index\n"
+                "  Or visit: https://github.com/nickarash/ast-index"
+            )
+            raise typer.Exit(1)
+        except subprocess.TimeoutExpired:
+            typer.echo("Error: ast-index rebuild timed out after 5 minutes.")
+            raise typer.Exit(1)
+
+        # Re-create reader to pick up new DB path
+        reader = ASTIndexReader(cfg.project_root)
+
     if not reader.is_available():
-        typer.echo("Error: AST index not found. Run ast-index first.")
+        typer.echo("Error: AST index not found after rebuild. Check ast-index installation.")
         raise typer.Exit(1)
 
     typer.echo("Reading AST index...")

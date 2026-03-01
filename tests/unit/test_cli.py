@@ -56,3 +56,36 @@ def test_serve_command_exists():
     result = runner.invoke(app, ["serve", "--help"])
     assert result.exit_code == 0
     assert "MCP" in result.stdout or "server" in result.stdout.lower()
+
+
+def test_ingest_runs_ast_index_when_no_db(tmp_path, monkeypatch):
+    """ingest should try ast-index rebuild when no DB exists."""
+    from unittest.mock import patch, MagicMock
+
+    (tmp_path / ".code-brain").mkdir()
+    monkeypatch.setenv("CODE_BRAIN_PROJECT", str(tmp_path))
+
+    mock_run = MagicMock()
+    mock_run.return_value.returncode = 1  # ast-index rebuild "fails"
+
+    with patch("subprocess.run", mock_run):
+        result = runner.invoke(app, ["ingest"])
+
+    # Should have attempted ast-index rebuild
+    calls = [str(c) for c in mock_run.call_args_list]
+    assert any("ast-index" in c and "rebuild" in c for c in calls), \
+        f"Expected ast-index rebuild call, got: {calls}"
+
+
+def test_ingest_ast_index_not_found_shows_install_help(tmp_path, monkeypatch):
+    """When ast-index binary not found, show install instructions."""
+    from unittest.mock import patch
+
+    (tmp_path / ".code-brain").mkdir()
+    monkeypatch.setenv("CODE_BRAIN_PROJECT", str(tmp_path))
+
+    with patch("subprocess.run", side_effect=FileNotFoundError("not found")):
+        result = runner.invoke(app, ["ingest"])
+
+    assert "ast-index not installed" in result.stdout
+    assert "cargo install" in result.stdout
