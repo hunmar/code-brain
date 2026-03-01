@@ -1,876 +1,315 @@
-# Deep Cognee Integration Implementation Plan
+# Deep Cognee Integration Implementation Plan (Reviewed + Enhanced)
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+**Date:** 2026-03-01  
+**Scope:** `code-brain` deep semantic integration with cognee as a first-class runtime dependency.
 
-**Goal:** Make cognee a first-class partner with ast-index — custom code graph models, batched ingestion, all search types, memify enrichment, graceful degradation, 14 MCP tools.
+## 1. Review Summary
 
-**Architecture:** Custom Pydantic models extending cognee's DataPoint feed structured code data into cognee's LLM pipeline. The CogneeAdapter is rebuilt to batch-ingest CodeFunction/CodeClass/CodeModule instances, call cognify once, then memify for enrichment. The MCP server gains 2 new tools and maps existing semantic tools to specific cognee search types. All cognee-powered tools degrade gracefully when backends are down.
+The original draft had strong intent but several execution risks. This revised plan addresses them directly:
 
-**Tech Stack:** Python 3.12, cognee (add/cognify/search/memify), cognee.infrastructure.engine.models.DataPoint, cognee.modules.search.types.SearchType, mcp, typer, networkx
+1. `DataPoint` model examples used mutable defaults (`[]`, `{}`), which can leak state across instances.
+2. Adapter tests patched `cognee.add` directly, but runtime imports use module-scoped `code_brain.ingestion.cognee_adapter.cognee`; patch targets should match actual call sites.
+3. "Structured ingestion" converted models back into plain text strings; this weakens schema benefits and makes behavior harder to validate.
+4. Search type mapping assumed one enum representation (`value`) and could break if `SearchType` uses a different format (`name` or mixed-case values).
+5. Graceful degradation design did not define typed errors, fallback boundaries, or which tools may safely degrade.
+6. Test strategy lacked integration gates for backend-down behavior and for one-shot `cognify`/`memify` execution.
+7. Rollout instructions mixed implementation and release actions (`git push`) in the plan; this version separates engineering completion from release decisions.
+
+## 2. Enhanced Core Idea
+
+The core idea is upgraded from "semantic add-on" to an **evidence-backed intelligence loop**:
+
+1. **Structural truth layer (ast-index):** exact symbol/file/line relationships remain the source of factual grounding.
+2. **Semantic meaning layer (cognee):** purpose, intent, architectural role, and concept-level relationships are inferred and enriched.
+3. **Unified answer contract:** semantic answers should include structural anchors and confidence, not only free-form prose.
+4. **Staged retrieval policy:** start with lower-cost retrieval (`CHUNKS` or summary modes), then escalate to heavier reasoning (`GRAPH_COMPLETION_COT`) only when needed.
+5. **Resilience by design:** when semantic systems fail, return structural evidence with explicit degraded status.
+
+### Semantic Response Contract
+
+Semantic endpoints should return a stable shape where possible:
+
+```json
+{
+  "answer": "short synthesized answer",
+  "evidence": [
+    {"symbol": "AuthService", "file_path": "src/auth/service.py", "line": 42}
+  ],
+  "confidence": "low|medium|high",
+  "degraded": false,
+  "warnings": []
+}
+```
+
+This lets CLI/MCP consumers reason about trust and fallback quality.
+
+## 3. Goals, Non-Goals, and Success Criteria
+
+### Goals
+
+1. Make cognee integration schema-driven (code models) and batch-oriented.
+2. Expand semantic functionality from 12 to 14 MCP tools (`code_search`, `code_reason`).
+3. Map semantic APIs to explicit cognee search types.
+4. Add graceful degradation when semantic backends are unavailable.
+5. Keep structural workflows fully operational when semantic layer is down.
+6. Ensure semantic outputs are evidence-backed and confidence-scored.
+
+### Non-Goals
+
+1. Replacing ast-index or the NetworkX graph model.
+2. Introducing distributed ingestion workers.
+3. Reworking CLI UX outside semantic-related commands.
+
+### Success Criteria
+
+1. Unit and integration tests pass for new behavior.
+2. `code-brain ingest` performs one semantic finalization cycle (`cognify`, optional `memify`) per run.
+3. MCP reports 14 tools and new tools are callable.
+4. Semantic tool failures return actionable responses without crashing server process.
+5. README and command help reflect new semantics (`--structural-only`, new tools/commands).
+6. `code_ask`, `code_reason`, and `code_explain` provide evidence anchors in output or explicit degraded warnings.
+
+## 4. Preconditions and Constraints
+
+1. Python requirement remains `>=3.11` (per current `pyproject.toml`).
+2. Confirm cognee API compatibility before coding:
+   - `cognee.add(...)`
+   - `cognee.cognify()`
+   - `cognee.memify()`
+   - `cognee.search(query_text=..., query_type=..., top_k=...)`
+3. Docker-backed services (Neo4j/Qdrant) are required for semantic integration tests.
+4. Structural features must remain available when semantic dependencies are missing or unreachable.
+
+## 5. Implementation Strategy (Phased)
+
+### Phase 0: Contract Check and Baseline
+
+**Files:**
+- `src/code_brain/ingestion/cognee_adapter.py`
+- `tests/unit/test_cognee_adapter.py`
+
+**Actions:**
+1. Add focused tests that lock expected call contracts for add/cognify/memify/search.
+2. Introduce a single helper for search type resolution that supports enum names and values.
+3. Define error taxonomy in adapter layer (`semantic_unavailable`, `semantic_query_failed`, `semantic_validation_failed`).
+
+**Exit Criteria:**
+1. Adapter tests fail with current implementation for the right reasons (missing features).
+2. API contract is documented in test names and assertions.
 
 ---
 
-### Task 1: Create custom code graph models
+### Phase 1: Introduce Code-Specific Data Models
 
 **Files:**
 - Create: `src/code_brain/models.py`
-- Test: `tests/unit/test_models.py`
+- Create/Modify: `tests/unit/test_models.py`
 
-**Step 1: Write the failing test**
+**Actions:**
+1. Add `CodeFunction`, `CodeClass`, `CodeModule` extending cognee `DataPoint`.
+2. Use `Field(default_factory=...)` for lists/dicts to avoid shared mutable state.
+3. Include explicit index metadata fields for semantic retrieval tuning.
 
-```python
-# tests/unit/test_models.py
-from code_brain.models import CodeFunction, CodeClass, CodeModule
+**Model Requirements:**
+1. `CodeFunction`: name, signature, location, parameters, return type, purpose hints.
+2. `CodeClass`: name, location, parents, methods, architectural role hints.
+3. `CodeModule`: module identity, import/export boundaries, domain hint.
 
-
-def test_code_function_creates():
-    fn = CodeFunction(
-        name="authenticate",
-        signature="def authenticate(self, email, password)",
-        file_path="src/auth.py",
-        line=10,
-        module="auth",
-        parameters=["email", "password"],
-        return_type="bool",
-        docstring="Authenticate a user.",
-        body_summary="if check_password(email, password): return True",
-    )
-    assert fn.name == "authenticate"
-    assert fn.kind == "function"
-    assert "name" in fn.metadata.get("index_fields", [])
-
-
-def test_code_class_creates():
-    cls = CodeClass(
-        name="UserService",
-        file_path="src/services.py",
-        line=5,
-        parents=["BaseService"],
-        methods=["create_user", "delete_user"],
-        docstring="Manages user lifecycle.",
-    )
-    assert cls.name == "UserService"
-    assert cls.kind == "class"
-    assert "architectural_role" in cls.metadata.get("index_fields", [])
-
-
-def test_code_module_creates():
-    mod = CodeModule(
-        name="auth",
-        path="src/auth",
-        imports=["models", "utils"],
-        exports=["authenticate", "AuthService"],
-    )
-    assert mod.name == "auth"
-    assert mod.kind == "module"
-```
-
-**Step 2: Run test to verify it fails**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_models.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'code_brain.models'`
-
-**Step 3: Write minimal implementation**
-
-```python
-# src/code_brain/models.py
-"""Code-specific graph models for cognee integration."""
-from __future__ import annotations
-
-from cognee.infrastructure.engine.models.DataPoint import DataPoint
-
-
-class CodeFunction(DataPoint):
-    """A function or method in the codebase."""
-    name: str
-    signature: str
-    file_path: str
-    line: int
-    module: str = ""
-    parameters: list[str] = []
-    return_type: str = ""
-    docstring: str = ""
-    body_summary: str = ""
-    purpose: str = ""
-    complexity: str = ""
-    kind: str = "function"
-    metadata: dict = {"index_fields": ["name", "signature", "purpose"]}
-
-
-class CodeClass(DataPoint):
-    """A class in the codebase."""
-    name: str
-    file_path: str
-    line: int
-    parents: list[str] = []
-    methods: list[str] = []
-    docstring: str = ""
-    purpose: str = ""
-    architectural_role: str = ""
-    kind: str = "class"
-    metadata: dict = {"index_fields": ["name", "purpose", "architectural_role"]}
-
-
-class CodeModule(DataPoint):
-    """A module/package in the codebase."""
-    name: str
-    path: str
-    imports: list[str] = []
-    exports: list[str] = []
-    description: str = ""
-    domain: str = ""
-    kind: str = "module"
-    metadata: dict = {"index_fields": ["name", "description", "domain"]}
-```
-
-**Step 4: Run test to verify it passes**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_models.py -v`
-Expected: PASS
-
-**Step 5: Commit**
-
-```bash
-git add src/code_brain/models.py tests/unit/test_models.py
-git commit -m "feat: add custom code graph models extending cognee DataPoint"
-```
+**Exit Criteria:**
+1. Model construction tests pass.
+2. No mutable-default lint/test regressions.
 
 ---
 
-### Task 2: Rebuild CogneeAdapter with batched structured ingestion
+### Phase 2: Rebuild `CogneeAdapter` for Batched Structured Ingestion
 
 **Files:**
-- Modify: `src/code_brain/ingestion/cognee_adapter.py` (full rewrite)
-- Test: `tests/unit/test_cognee_adapter.py` (update)
+- Modify: `src/code_brain/ingestion/cognee_adapter.py`
+- Modify: `tests/unit/test_cognee_adapter.py`
 
-**Step 1: Write the failing tests**
+**Actions:**
+1. Convert symbols/deps/docs into typed model payloads before ingestion.
+2. Batch `add` calls by dataset category (`code_symbols`, `code_relationships`, `documentation`).
+3. Move `cognify` and `memify` out of per-ingest methods into `finalize()`.
+4. Add `finalize(run_memify: bool = True)` and make memify non-fatal.
+5. Implement `search(query, search_type, top_k)` with robust search type normalization.
 
-```python
-# tests/unit/test_cognee_adapter.py
-import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
-from code_brain.ingestion.ast_index import Symbol, ModuleDep
-from code_brain.ingestion.cognee_adapter import CogneeAdapter
+**Testing Requirements:**
+1. `ingest_symbols` does not call `cognify` directly.
+2. `finalize()` calls `cognify` exactly once.
+3. `memify` failures are captured and surfaced as warning context, not fatal crashes.
+4. Search uses resolved `query_type` and passes `top_k`.
 
-
-@pytest.fixture
-def adapter():
-    return CogneeAdapter()
-
-
-@pytest.fixture
-def sample_symbols():
-    return [
-        Symbol(id=1, name="User", kind="class", file_path="src/models.py",
-               line=5, signature="class User:", parent_id=None),
-        Symbol(id=2, name="authenticate", kind="function", file_path="src/auth.py",
-               line=10, signature="def authenticate(email, password)", parent_id=None),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_ingest_builds_code_models(adapter, sample_symbols):
-    """ingest_symbols should create CodeFunction/CodeClass instances, not flat text."""
-    with patch("cognee.add", new_callable=AsyncMock) as mock_add, \
-         patch("cognee.cognify", new_callable=AsyncMock), \
-         patch("cognee.memify", new_callable=AsyncMock):
-        await adapter.ingest_symbols(sample_symbols)
-
-    # Should batch-add, not per-symbol
-    assert mock_add.call_count <= 2  # at most one call per batch, not per symbol
-
-
-@pytest.mark.asyncio
-async def test_ingest_calls_cognify_once(adapter, sample_symbols):
-    """Should call cognify exactly once after all data is added."""
-    with patch("cognee.add", new_callable=AsyncMock) as mock_add, \
-         patch("cognee.cognify", new_callable=AsyncMock) as mock_cognify, \
-         patch("cognee.memify", new_callable=AsyncMock):
-        await adapter.ingest_symbols(sample_symbols)
-        await adapter.finalize()
-
-    mock_cognify.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_search_with_search_type(adapter):
-    """search should accept and pass search_type to cognee."""
-    mock_results = [MagicMock(__str__=lambda self: "result")]
-    with patch("cognee.search", new_callable=AsyncMock, return_value=mock_results) as mock_search:
-        results = await adapter.search("test query", search_type="CHUNKS")
-
-    mock_search.assert_called_once()
-    call_kwargs = mock_search.call_args
-    assert "query_type" in str(call_kwargs)
-```
-
-**Step 2: Run test to verify it fails**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_cognee_adapter.py -v`
-Expected: FAIL — old adapter doesn't have `finalize()` or `search_type`
-
-**Step 3: Write minimal implementation**
-
-```python
-# src/code_brain/ingestion/cognee_adapter.py
-"""Cognee integration — structured code ingestion and multi-type search."""
-from __future__ import annotations
-
-import cognee
-from cognee.modules.search.types.SearchType import SearchType
-
-from code_brain.ingestion.ast_index import Symbol, ModuleDep
-from code_brain.models import CodeFunction, CodeClass, CodeModule
-
-
-# Map string names to SearchType enum
-SEARCH_TYPE_MAP = {st.value: st for st in SearchType}
-
-
-class CogneeAdapter:
-    """Bridges code-brain's structural data with cognee's semantic pipeline."""
-
-    def _symbol_to_model(self, sym: Symbol) -> CodeFunction | CodeClass:
-        if sym.kind == "class":
-            return CodeClass(
-                name=sym.name,
-                file_path=sym.file_path,
-                line=sym.line,
-                docstring="",
-                parents=[],
-                methods=[],
-            )
-        return CodeFunction(
-            name=sym.name,
-            signature=sym.signature or "",
-            file_path=sym.file_path,
-            line=sym.line,
-            module=sym.file_path.rsplit("/", 1)[0] if "/" in sym.file_path else "",
-            parameters=[],
-            return_type="",
-            docstring="",
-            body_summary=sym.signature or "",
-        )
-
-    async def ingest_symbols(self, symbols: list[Symbol]) -> None:
-        """Batch-add symbols as structured code models."""
-        models = [self._symbol_to_model(s) for s in symbols]
-        # Feed as text representations for cognee to process
-        docs = []
-        for m in models:
-            if isinstance(m, CodeClass):
-                docs.append(
-                    f"Code class: {m.name}\n"
-                    f"File: {m.file_path}:{m.line}\n"
-                    f"Parents: {', '.join(m.parents) if m.parents else 'none'}\n"
-                    f"Methods: {', '.join(m.methods) if m.methods else 'none'}\n"
-                )
-            else:
-                docs.append(
-                    f"Code function: {m.name}\n"
-                    f"Signature: {m.signature}\n"
-                    f"File: {m.file_path}:{m.line}\n"
-                    f"Module: {m.module}\n"
-                )
-        if docs:
-            combined = "\n---\n".join(docs)
-            await cognee.add(combined, dataset_name="code_symbols")
-
-    async def ingest_module_deps(self, deps: list[ModuleDep]) -> None:
-        """Batch-add module dependencies."""
-        if not deps:
-            return
-        docs = [
-            f"Module {d.source} depends on {d.target} (relationship: {d.kind})"
-            for d in deps
-        ]
-        combined = "\n".join(docs)
-        await cognee.add(combined, dataset_name="code_relationships")
-
-    async def ingest_docs(self, doc_contents: list[tuple[str, str]]) -> None:
-        """Batch-add documentation."""
-        if not doc_contents:
-            return
-        for filename, content in doc_contents:
-            await cognee.add(
-                f"Document: {filename}\n\n{content}",
-                dataset_name="documentation",
-            )
-
-    async def finalize(self) -> None:
-        """Run cognify + memify once after all data is ingested."""
-        await cognee.cognify()
-        try:
-            await cognee.memify()
-        except Exception:
-            pass  # memify is optional enrichment
-
-    async def search(
-        self,
-        query: str,
-        search_type: str = "GRAPH_COMPLETION",
-        top_k: int = 10,
-    ) -> list[dict]:
-        """Search using any of cognee's 14 search types."""
-        st = SEARCH_TYPE_MAP.get(search_type, SearchType.GRAPH_COMPLETION)
-        results = await cognee.search(
-            query_text=query,
-            query_type=st,
-            top_k=top_k,
-        )
-        return [{"text": str(r)} for r in results]
-```
-
-**Step 4: Run tests to verify they pass**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_cognee_adapter.py -v`
-Expected: PASS
-
-**Step 5: Commit**
-
-```bash
-git add src/code_brain/ingestion/cognee_adapter.py tests/unit/test_cognee_adapter.py
-git commit -m "feat: rebuild CogneeAdapter with batched ingestion and multi-type search"
-```
+**Exit Criteria:**
+1. Adapter unit tests pass.
+2. No semantic calls are executed in per-item loops.
 
 ---
 
-### Task 3: Update SemanticQueryEngine to use search types
+### Phase 3: Expand Semantic Query Engine with Explicit Search Modes
 
 **Files:**
 - Modify: `src/code_brain/query/semantic.py`
-- Test: `tests/unit/test_semantic_queries.py`
+- Modify: `tests/unit/test_semantic_queries.py`
 
-**Step 1: Write the failing tests**
+**Actions:**
+1. Map methods to search types:
+   - `ask` -> `GRAPH_COMPLETION`
+   - `explain` -> `GRAPH_SUMMARY_COMPLETION`
+   - `search_fast` -> `CHUNKS`
+   - `reason` -> `GRAPH_COMPLETION_COT`
+   - `review_diff` -> `CODING_RULES`
+2. Add evidence extraction hooks so semantic responses include symbol/file/line anchors when available.
+3. Add confidence scoring heuristic:
+   - `high`: multiple consistent structural anchors
+   - `medium`: at least one direct structural anchor
+   - `low`: semantic-only answer with weak/no anchor
+4. Keep `explain` behavior as hybrid output (structural context + semantic context).
+5. Preserve output shape consistency across methods.
 
-```python
-# Add to tests/unit/test_semantic_queries.py
-@pytest.mark.asyncio
-async def test_ask_uses_graph_completion(mock_adapter):
-    engine = SemanticQueryEngine(mock_adapter)
-    await engine.ask("How does auth work?")
-    mock_adapter.search.assert_called_once()
-    assert mock_adapter.search.call_args[1].get("search_type") == "GRAPH_COMPLETION"
-
-
-@pytest.mark.asyncio
-async def test_explain_uses_summary_completion(mock_adapter):
-    engine = SemanticQueryEngine(mock_adapter)
-    await engine.explain("UserService")
-    assert mock_adapter.search.call_args[1].get("search_type") == "GRAPH_SUMMARY_COMPLETION"
-
-
-@pytest.mark.asyncio
-async def test_search_chunks(mock_adapter):
-    engine = SemanticQueryEngine(mock_adapter)
-    await engine.search_fast("authentication logic")
-    assert mock_adapter.search.call_args[1].get("search_type") == "CHUNKS"
-
-
-@pytest.mark.asyncio
-async def test_reason_uses_cot(mock_adapter):
-    engine = SemanticQueryEngine(mock_adapter)
-    await engine.reason("Why does the payment module depend on auth?")
-    assert mock_adapter.search.call_args[1].get("search_type") == "GRAPH_COMPLETION_COT"
-
-
-@pytest.mark.asyncio
-async def test_review_uses_coding_rules(mock_adapter):
-    engine = SemanticQueryEngine(mock_adapter)
-    await engine.review_diff("+ def foo(): pass")
-    assert mock_adapter.search.call_args[1].get("search_type") == "CODING_RULES"
-```
-
-**Step 2: Run test to verify they fail**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_semantic_queries.py -v`
-Expected: FAIL — no `search_fast`, `reason`, `review_diff` methods
-
-**Step 3: Write minimal implementation**
-
-```python
-# src/code_brain/query/semantic.py
-from code_brain.ingestion.cognee_adapter import CogneeAdapter
-
-
-class SemanticQueryEngine:
-    def __init__(self, adapter: CogneeAdapter):
-        self._adapter = adapter
-
-    async def ask(self, question: str) -> list[dict]:
-        """Natural language Q&A with full graph context."""
-        return await self._adapter.search(
-            question, search_type="GRAPH_COMPLETION"
-        )
-
-    async def explain(self, symbol_name: str,
-                      structural_info: dict | None = None) -> str:
-        """Explain a symbol using pre-computed summaries + structural context."""
-        semantic = await self._adapter.search(
-            f"Explain the purpose and context of {symbol_name}",
-            search_type="GRAPH_SUMMARY_COMPLETION",
-        )
-
-        parts = [f"# {symbol_name}"]
-        if structural_info:
-            parts.append(
-                f"\nLocation: {structural_info.get('file_path', '?')}"
-                f":{structural_info.get('line', '?')}"
-            )
-            parts.append(f"Kind: {structural_info.get('kind', '?')}")
-
-        if semantic:
-            parts.append("\n## Semantic Context")
-            for item in semantic:
-                parts.append(f"- {item.get('text', str(item))}")
-
-        return "\n".join(parts)
-
-    async def search_fast(self, query: str, top_k: int = 10) -> list[dict]:
-        """Fast vector similarity search — no LLM call."""
-        return await self._adapter.search(
-            query, search_type="CHUNKS", top_k=top_k
-        )
-
-    async def reason(self, question: str) -> list[dict]:
-        """Chain-of-thought reasoning over the code graph."""
-        return await self._adapter.search(
-            question, search_type="GRAPH_COMPLETION_COT"
-        )
-
-    async def review_diff(self, diff: str) -> list[dict]:
-        """Review a diff against coding rules stored in the graph."""
-        return await self._adapter.search(
-            f"Review this code change for potential issues:\n\n{diff}",
-            search_type="CODING_RULES",
-        )
-```
-
-**Step 4: Run tests to verify they pass**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_semantic_queries.py -v`
-Expected: PASS
-
-**Step 5: Commit**
-
-```bash
-git add src/code_brain/query/semantic.py tests/unit/test_semantic_queries.py
-git commit -m "feat: map semantic queries to specific cognee search types"
-```
+**Exit Criteria:**
+1. Semantic query tests verify correct `search_type` dispatch.
+2. Existing `ask`/`explain` behavior remains backward compatible.
+3. Evidence and confidence fields are populated or explicitly marked unavailable.
 
 ---
 
-### Task 4: Add MCP error handling and graceful degradation
+### Phase 4: MCP Server Hardening + Tool Expansion (14 Tools)
 
 **Files:**
-- Modify: `src/code_brain/mcp_server.py:216-278`
-- Test: `tests/unit/test_mcp_server.py`
+- Modify: `src/code_brain/mcp_server.py`
+- Modify: `tests/unit/test_mcp_server.py`
 
-**Step 1: Write the failing test**
+**Actions:**
+1. Add tools:
+   - `code_search`
+   - `code_reason`
+2. Update tool descriptions to clarify semantics and expected usage.
+3. Add `_safe_semantic_call(...)` wrapper with typed fallback responses.
+4. Wrap semantic/hybrid calls, but keep structural calls direct.
+5. Pass `project_root` to `StructuralQueryEngine` in server construction.
 
-```python
-# Add to tests/unit/test_mcp_server.py
-def test_semantic_tools_degrade_gracefully():
-    """When cognee is unavailable, semantic tools should return helpful error, not crash."""
-    from code_brain.mcp_server import _safe_semantic_call
-    import asyncio
+**Degradation Rules:**
+1. If semantic backends unavailable: return actionable message (`code-brain up && code-brain ingest`).
+2. If structural fallback is feasible (for hybrid endpoints), return partial results with warning field.
+3. Never raise uncaught semantic exceptions from `_dispatch`.
+4. Degraded semantic responses should set `degraded=true` and preserve available structural evidence.
 
-    async def failing_call():
-        raise Exception("sqlite3.OperationalError: unable to open database file")
-
-    result = asyncio.run(_safe_semantic_call(failing_call()))
-    assert "error" in result or "unavailable" in str(result).lower()
-```
-
-**Step 2: Run test to verify it fails**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_mcp_server.py::test_semantic_tools_degrade_gracefully -v`
-Expected: FAIL — `_safe_semantic_call` doesn't exist
-
-**Step 3: Write minimal implementation**
-
-In `src/code_brain/mcp_server.py`, add a helper and wrap semantic tool calls:
-
-```python
-async def _safe_semantic_call(coro):
-    """Wrap semantic/cognee calls with graceful error handling."""
-    try:
-        return await coro
-    except Exception as e:
-        error_msg = str(e)
-        if "OperationalError" in error_msg or "Connection refused" in error_msg:
-            return {
-                "error": "Semantic features unavailable. Run: code-brain up && code-brain ingest",
-                "details": error_msg,
-            }
-        return {"error": f"Semantic query failed: {error_msg}"}
-```
-
-Then in `_dispatch`, wrap all semantic tool calls:
-
-```python
-    if name == "code_ask":
-        return await _safe_semantic_call(semantic.ask(arguments["question"]))
-
-    if name == "code_explain":
-        symbol_name = arguments["symbol"]
-        found = structural.find(symbol_name)
-        structural_info = found[0] if found else None
-        return await _safe_semantic_call(
-            semantic.explain(symbol_name, structural_info)
-        )
-
-    if name == "code_impact":
-        result = await _safe_semantic_call(
-            hybrid.impact(arguments["symbol"], token_budget=arguments.get("token_budget", 8000))
-        )
-        return result
-
-    if name == "code_review_diff":
-        return await _safe_semantic_call(
-            semantic.review_diff(arguments["diff"])
-        )
-
-    if name == "code_search":
-        return await _safe_semantic_call(
-            semantic.search_fast(arguments["query"], top_k=arguments.get("top_k", 10))
-        )
-
-    if name == "code_reason":
-        return await _safe_semantic_call(
-            semantic.reason(arguments["question"])
-        )
-```
-
-**Step 4: Run tests to verify they pass**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_mcp_server.py -v`
-Expected: PASS
-
-**Step 5: Commit**
-
-```bash
-git add src/code_brain/mcp_server.py tests/unit/test_mcp_server.py
-git commit -m "feat: add graceful degradation for semantic MCP tools"
-```
+**Exit Criteria:**
+1. MCP tool count is 14.
+2. New tools are discoverable via `list_tools` and executable via `call_tool`.
+3. Backend-down tests verify non-crashing responses.
 
 ---
 
-### Task 5: Add new MCP tools (code_search, code_reason) and update tool descriptions
+### Phase 5: CLI Integration and Migration
 
 **Files:**
-- Modify: `src/code_brain/mcp_server.py` (TOOL_NAMES, TOOLS list, _dispatch)
-- Test: `tests/unit/test_mcp_server.py`
+- Modify: `src/code_brain/cli.py`
+- Modify: `tests/unit/test_cli.py`
 
-**Step 1: Write the failing test**
+**Actions:**
+1. Replace `--skip-semantic` with `--structural-only`.
+2. Keep backward compatibility for one release:
+   - Accept legacy `--skip-semantic` as hidden alias.
+   - Emit deprecation message directing users to `--structural-only`.
+3. Update ingest flow:
+   - ingest structural data
+   - batch semantic ingestion
+   - single finalize step
+   - warning-only failure path for semantic layer
+4. Add commands:
+   - `code-brain search`
+   - `code-brain reason`
 
-```python
-# Add to tests/unit/test_mcp_server.py
-def test_server_has_14_tools():
-    assert len(TOOL_NAMES) == 14
-
-
-def test_server_has_code_search():
-    assert "code_search" in TOOL_NAMES
-
-
-def test_server_has_code_reason():
-    assert "code_reason" in TOOL_NAMES
-```
-
-**Step 2: Run test to verify they fail**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_mcp_server.py -v`
-Expected: FAIL — only 12 tools
-
-**Step 3: Write minimal implementation**
-
-Add to TOOL_NAMES:
-
-```python
-TOOL_NAMES = [
-    "code_find_symbol",
-    "code_hierarchy",
-    "code_dependencies",
-    "code_usages",
-    "code_outline",
-    "code_ask",
-    "code_explain",
-    "code_impact",
-    "code_review_diff",
-    "code_map",
-    "code_hotspots",
-    "code_architecture",
-    "code_search",
-    "code_reason",
-]
-```
-
-Add to TOOLS list:
-
-```python
-    Tool(
-        name="code_search",
-        description="Fast semantic search for code by concept — no LLM call, returns vector-similar chunks. Use for quick lookups like 'authentication logic' or 'database connection handling'.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "What to search for"},
-                "top_k": {"type": "integer", "description": "Max results", "default": 10},
-            },
-            "required": ["query"],
-        },
-    ),
-    Tool(
-        name="code_reason",
-        description="Chain-of-thought reasoning about the codebase. Use for complex questions that need multi-step reasoning, like 'Why does module X depend on module Y?' or 'What would break if we removed this class?'",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "question": {"type": "string", "description": "Complex question requiring reasoning"},
-            },
-            "required": ["question"],
-        },
-    ),
-```
-
-Also update existing tool descriptions to be more informative:
-
-- `code_ask`: "Ask a natural language question about the codebase. Uses the full knowledge graph for context-aware answers about architecture, patterns, and business logic."
-- `code_explain`: "Get an explanation of a symbol including its context and purpose. Combines structural location with semantic understanding from the knowledge graph."
-- `code_review_diff`: "Review a diff for potential issues using coding rules stored in the knowledge graph. Checks against patterns and conventions learned during ingestion."
-
-Add dispatch cases in `_dispatch()` for new tools (as shown in Task 4).
-
-**Step 4: Run tests to verify they pass**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_mcp_server.py -v`
-Expected: PASS
-
-Also update the old test: `test_server_has_expected_tools` checks `len(TOOL_NAMES) == 12` — update to `14`.
-
-**Step 5: Commit**
-
-```bash
-git add src/code_brain/mcp_server.py tests/unit/test_mcp_server.py
-git commit -m "feat: add code_search and code_reason MCP tools, improve descriptions"
-```
+**Exit Criteria:**
+1. Help output shows `--structural-only`.
+2. Legacy flag works with deprecation warning.
+3. New semantic commands execute and format output in text/json modes.
 
 ---
 
-### Task 6: Update ingest command for unified pipeline
-
-**Files:**
-- Modify: `src/code_brain/cli.py:230-337` (ingest command)
-- Test: `tests/unit/test_cli.py`
-
-**Step 1: Write the failing test**
-
-```python
-# Add to tests/unit/test_cli.py
-def test_ingest_structural_only_flag(tmp_path, monkeypatch):
-    """--structural-only should replace --skip-semantic."""
-    result = runner.invoke(app, ["ingest", "--help"])
-    assert "--structural-only" in result.stdout
-```
-
-**Step 2: Run test to verify it fails**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_cli.py::test_ingest_structural_only_flag -v`
-Expected: FAIL — flag is still `--skip-semantic`
-
-**Step 3: Write minimal implementation**
-
-In `src/code_brain/cli.py`, update the `ingest` command:
-
-1. Rename `skip_semantic` to `structural_only`:
-
-```python
-@app.command()
-def ingest(
-    project: Optional[str] = typer.Option(None, help="Project root"),
-    structural_only: bool = typer.Option(False, "--structural-only", help="Skip cognee, build graph from AST + git only"),
-    rebuild: bool = typer.Option(False, "--rebuild", help="Force ast-index rebuild"),
-):
-```
-
-2. Replace the semantic ingestion block (lines 322-334) with the new batched flow:
-
-```python
-    if not structural_only:
-        typer.echo("Ingesting into cognee knowledge graph...")
-        from code_brain.ingestion.cognee_adapter import CogneeAdapter
-        from code_brain.ingestion.doc_ingester import find_docs
-
-        adapter = CogneeAdapter()
-        try:
-            asyncio.run(adapter.ingest_symbols(symbols))
-            asyncio.run(adapter.ingest_module_deps(all_deps))
-
-            docs = find_docs(cfg.project_root)
-            if docs:
-                asyncio.run(adapter.ingest_docs(docs))
-                typer.echo(f"Ingested {len(docs)} documents.")
-
-            typer.echo("Running cognee cognify + memify...")
-            asyncio.run(adapter.finalize())
-            typer.echo("Semantic enrichment complete.")
-        except Exception as e:
-            typer.echo(f"Warning: Semantic ingestion failed: {e}")
-            typer.echo("  Structural graph still available. Run 'code-brain doctor' to diagnose.")
-    else:
-        typer.echo("Skipping semantic ingestion (--structural-only).")
-```
-
-**Step 4: Run tests to verify they pass**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_cli.py -v`
-Expected: PASS
-
-**Step 5: Commit**
-
-```bash
-git add src/code_brain/cli.py tests/unit/test_cli.py
-git commit -m "feat: update ingest with batched cognee pipeline and --structural-only flag"
-```
-
----
-
-### Task 7: Add CLI commands for new search types
-
-**Files:**
-- Modify: `src/code_brain/cli.py` (add `search` and `reason` commands)
-- Test: `tests/unit/test_cli.py`
-
-**Step 1: Write the failing test**
-
-```python
-def test_search_command_exists():
-    result = runner.invoke(app, ["search", "--help"])
-    assert result.exit_code == 0
-    assert "semantic" in result.stdout.lower() or "vector" in result.stdout.lower()
-
-
-def test_reason_command_exists():
-    result = runner.invoke(app, ["reason", "--help"])
-    assert result.exit_code == 0
-```
-
-**Step 2: Run test to verify they fail**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_cli.py::test_search_command_exists -v`
-Expected: FAIL
-
-**Step 3: Write minimal implementation**
-
-Add to `src/code_brain/cli.py`:
-
-```python
-@app.command()
-def search(
-    query: str = typer.Argument(..., help="Search query"),
-    top_k: int = typer.Option(10, help="Max results"),
-    json: bool = typer.Option(False, "--json", help="JSON output"),
-    project: Optional[str] = typer.Option(None, help="Project root"),
-):
-    """Fast semantic search — find code by concept without LLM call."""
-    cfg = _get_config(project)
-    engine = _get_semantic_engine(cfg)
-    results = asyncio.run(engine.search_fast(query, top_k=top_k))
-    if json:
-        typer.echo(json_fmt.format(results))
-    else:
-        for item in results:
-            typer.echo(f"  {item.get('text', str(item))}")
-        if not results:
-            typer.echo("No results found.")
-
-
-@app.command()
-def reason(
-    question: str = typer.Argument(..., help="Complex question requiring reasoning"),
-    json: bool = typer.Option(False, "--json", help="JSON output"),
-    project: Optional[str] = typer.Option(None, help="Project root"),
-):
-    """Chain-of-thought reasoning about the codebase."""
-    cfg = _get_config(project)
-    engine = _get_semantic_engine(cfg)
-    results = asyncio.run(engine.reason(question))
-    if json:
-        typer.echo(json_fmt.format(results))
-    else:
-        for item in results:
-            typer.echo(f"  {item.get('text', str(item))}")
-        if not results:
-            typer.echo("No results found.")
-```
-
-**Step 4: Run tests to verify they pass**
-
-Run: `cd /home/exedev/code-brain && uv run pytest tests/unit/test_cli.py -v`
-Expected: PASS
-
-**Step 5: Commit**
-
-```bash
-git add src/code_brain/cli.py tests/unit/test_cli.py
-git commit -m "feat: add search and reason CLI commands for new cognee search types"
-```
-
----
-
-### Task 8: Update MCP server to pass project_root to structural engine
-
-**Files:**
-- Modify: `src/code_brain/mcp_server.py:189-213` (create_server)
-
-**Step 1: Verify issue exists**
-
-The `create_server` function creates `StructuralQueryEngine(reader)` without `project_root`. Fix:
-
-```python
-structural = StructuralQueryEngine(reader, project_root=config.project_root)
-```
-
-**Step 2: Make the fix**
-
-Single line change in `create_server`.
-
-**Step 3: Run all tests**
-
-Run: `cd /home/exedev/code-brain && uv run pytest -v`
-Expected: ALL PASS
-
-**Step 4: Commit**
-
-```bash
-git add src/code_brain/mcp_server.py
-git commit -m "fix: pass project_root to structural engine in MCP server"
-```
-
----
-
-### Task 9: Update README and run full test suite
+### Phase 6: Documentation and Operator Guidance
 
 **Files:**
 - Modify: `README.md`
+- Modify: `docs/plans/2026-03-01-cognee-deep-integration-design.md` (only if drift exists)
 
-**Step 1: Update README**
+**Actions:**
+1. Update MCP tool count from 12 -> 14.
+2. Document `code_search` and `code_reason` usage examples.
+3. Replace `--skip-semantic` references with migration note to `--structural-only`.
+4. Document degraded-mode behavior and recommended recovery commands.
+5. Document evidence/confidence semantics so client consumers can reason about answer trust.
 
-- Update tool count from 12 to 14
-- Add `code_search` and `code_reason` to tool tier table
-- Update `--skip-semantic` references to `--structural-only`
-- Update the ingestion section to describe the cognee pipeline
+**Exit Criteria:**
+1. README command list and MCP list align with code.
+2. No stale flag/tool references remain.
 
-**Step 2: Run full test suite**
+---
 
-Run: `cd /home/exedev/code-brain && uv run pytest -v`
-Expected: ALL PASS
+### Phase 7: Validation, Rollout, and Sign-Off
 
-**Step 3: Commit and push**
+**Validation Suite:**
+1. `uv run pytest tests/unit -v`
+2. `uv run pytest tests/integration -v` (semantic tests gated by backend availability)
+3. `uv run pytest -v`
+4. Manual smoke checks:
+   - `code-brain ingest --structural-only`
+   - `code-brain ingest`
+   - `code-brain ask "..."`
+   - `code-brain search "..."`
+   - `code-brain reason "..."`
+   - MCP `code_search`, `code_reason` calls
+   - verify `evidence`, `confidence`, and `degraded` fields on semantic outputs
 
-```bash
-git add README.md
-git commit -m "docs: update README for 14-tool cognee integration"
-git push
-```
+**Sign-Off Criteria:**
+1. All required tests pass.
+2. Backward compatibility behavior is verified.
+3. Error messages are actionable and non-ambiguous.
+4. Evidence and degraded-mode semantics are stable and documented.
+
+## 6. Test Matrix
+
+| Area | Unit | Integration | Manual |
+|---|---|---|---|
+| Models | `test_models.py` | n/a | instantiate sample models |
+| Adapter batching/finalize | `test_cognee_adapter.py` | semantic ingest tests | run ingest with/without backends |
+| Semantic query routing | `test_semantic_queries.py` | semantic search tests | ask/search/reason CLI |
+| Evidence contract | semantic + MCP shape tests | backend-up/down parity checks | inspect `evidence`, `confidence`, `degraded` fields |
+| MCP tool surface | `test_mcp_server.py` | MCP call tests | list/call tools in client |
+| CLI migration | `test_cli.py` | end-to-end ingest | help + legacy flag checks |
+
+## 7. Risks and Mitigations
+
+1. **Cognee API drift**
+   - Mitigation: lock expected adapter contract in tests before refactor.
+2. **Performance regression during ingest**
+   - Mitigation: require batched add behavior; track add-call counts in tests.
+3. **Semantic instability blocks all queries**
+   - Mitigation: strict separation of structural vs semantic failure paths.
+4. **CLI breaking change from flag rename**
+   - Mitigation: one-release compatibility alias + warning.
+5. **Inconsistent tool metadata vs dispatch behavior**
+   - Mitigation: tool list and dispatch assertions in MCP tests.
+6. **Low-trust semantic output**
+   - Mitigation: enforce evidence/confidence contract and degrade explicitly when anchors are missing.
+
+## 8. Rollback Plan
+
+If post-merge semantic regressions occur:
+
+1. Run structural-only ingest path (`code-brain ingest --structural-only`).
+2. Disable semantic calls at MCP layer by routing semantic endpoints to degraded responses.
+3. Revert adapter/search-type changes only, keeping structural and graph functionality active.
+4. Keep docs updated with temporary degraded-mode notice until semantic fix is released.
+
+## 9. Deliverables Checklist
+
+1. `src/code_brain/models.py` added with tested schema models.
+2. `CogneeAdapter` supports batched structured ingest, finalize, and typed search.
+3. `SemanticQueryEngine` includes `search_fast`, `reason`, `review_diff`, explicit search-type mapping, and evidence/confidence output.
+4. MCP server exposes 14 tools with graceful semantic error handling.
+5. CLI supports `search`, `reason`, and `--structural-only` migration path.
+6. README updated for 14-tool surface and revised ingest flow.
+7. Unit + integration + smoke validation completed.

@@ -439,6 +439,45 @@ def ask(
             typer.echo("No results found.")
 
 
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Search query"),
+    top_k: int = typer.Option(10, help="Max results"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+    project: Optional[str] = typer.Option(None, help="Project root"),
+):
+    """Fast semantic search by concept."""
+    cfg = _get_config(project)
+    engine = _get_semantic_engine(cfg)
+    results = asyncio.run(engine.search_fast(query, top_k=top_k))
+    if json:
+        typer.echo(json_fmt.format(results))
+    else:
+        for item in results:
+            typer.echo(f"  {item.get('text', str(item))}")
+        if not results:
+            typer.echo("No results found.")
+
+
+@app.command()
+def reason(
+    question: str = typer.Argument(..., help="Complex question requiring reasoning"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+    project: Optional[str] = typer.Option(None, help="Project root"),
+):
+    """Run deeper reasoning over code graph semantics."""
+    cfg = _get_config(project)
+    engine = _get_semantic_engine(cfg)
+    results = asyncio.run(engine.reason(question))
+    if json:
+        typer.echo(json_fmt.format(results))
+    else:
+        for item in results:
+            typer.echo(f"  {item.get('text', str(item))}")
+        if not results:
+            typer.echo("No results found.")
+
+
 @app.command(name="map")
 def repo_map(
     focus: Optional[str] = typer.Option(None, help="Comma-separated focus files"),

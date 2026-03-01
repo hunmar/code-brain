@@ -6,12 +6,16 @@ class SemanticQueryEngine:
         self._adapter = adapter
 
     async def ask(self, question: str) -> list[dict]:
-        return await self._adapter.search(question)
+        return await self._adapter.search(
+            question,
+            search_type="GRAPH_COMPLETION",
+        )
 
     async def explain(self, symbol_name: str,
                       structural_info: dict | None = None) -> str:
         semantic = await self._adapter.search(
-            f"Explain the purpose and context of {symbol_name}"
+            f"Explain the purpose and context of {symbol_name}",
+            search_type="GRAPH_SUMMARY_COMPLETION",
         )
 
         parts = [f"# {symbol_name}"]
@@ -28,3 +32,22 @@ class SemanticQueryEngine:
                 parts.append(f"- {item.get('text', str(item))}")
 
         return "\n".join(parts)
+
+    async def search_fast(self, query: str, top_k: int = 10) -> list[dict]:
+        return await self._adapter.search(
+            query,
+            search_type="CHUNKS",
+            top_k=top_k,
+        )
+
+    async def reason(self, question: str) -> list[dict]:
+        return await self._adapter.search(
+            question,
+            search_type="GRAPH_COMPLETION_COT",
+        )
+
+    async def review_diff(self, diff: str) -> list[dict]:
+        return await self._adapter.search(
+            f"Review this code change for potential issues:\n\n{diff}",
+            search_type="CODING_RULES",
+        )

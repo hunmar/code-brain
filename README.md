@@ -39,7 +39,7 @@ Unified code intelligence for LLM agents. Combines structural AST indexing ([ast
 - **Repo map** — PageRank-ranked overview of the most important code, fitted to a token budget
 - **Hot spots** — identify frequently-changed areas from git history
 - **Architecture diagrams** — auto-generated module dependency diagrams (Mermaid or text)
-- **MCP server** — 12 tools for Claude and other LLM agents
+- **MCP server** — 14 tools for Claude and other LLM agents
 - **Token budgeting** — compact/medium/full output depth based on context window limits
 
 ## Quick Start
@@ -99,6 +99,8 @@ code-brain outline src/models/user.py
 
 # Semantic queries (requires cognee backends running)
 code-brain ask "How does authentication work?"
+code-brain search "authentication middleware"
+code-brain reason "Why does payments depend on auth?"
 
 # Graph-powered analysis
 code-brain map                    # PageRank-ranked repo overview
@@ -119,7 +121,7 @@ code-brain serve
 
 ## MCP Server
 
-Code Brain exposes 12 tools via the [Model Context Protocol](https://modelcontextprotocol.io):
+Code Brain exposes 14 tools via the [Model Context Protocol](https://modelcontextprotocol.io):
 
 | Tool | Description |
 |------|-------------|
@@ -135,6 +137,8 @@ Code Brain exposes 12 tools via the [Model Context Protocol](https://modelcontex
 | `code_map` | Get a PageRank-ranked overview of important symbols |
 | `code_hotspots` | Find frequently-changed code areas |
 | `code_architecture` | Generate an architecture diagram |
+| `code_search` | Fast semantic chunk search for concept lookup |
+| `code_reason` | Multi-step reasoning for complex architecture questions |
 
 ### Tool Tiers
 
@@ -144,7 +148,7 @@ Not all tools require the full stack. Here is what each tier needs:
 |------|-------|-------------|
 | Structural (works immediately) | `code_find_symbol`, `code_hierarchy`, `code_usages`, `code_outline`, `code_dependencies` | Just `ast-index rebuild` |
 | Graph-powered | `code_map`, `code_architecture`, `code_hotspots`, `code_impact`, `code_review_diff` | `code-brain ingest` |
-| Semantic | `code_ask`, `code_explain` | `code-brain up` + `code-brain ingest` |
+| Semantic | `code_ask`, `code_explain`, `code_search`, `code_reason` | `code-brain up` + `code-brain ingest` |
 
 ### Claude Code Setup
 
@@ -193,9 +197,9 @@ Services:
 
 ```
 src/code_brain/
-├── cli.py                  # Typer CLI with 16 commands
+├── cli.py                  # Typer CLI entrypoint and commands
 ├── config.py               # Project config with env var overrides
-├── mcp_server.py           # MCP server with 12 tools
+├── mcp_server.py           # MCP server with 14 tools
 ├── ingestion/
 │   ├── ast_index.py        # Read-only SQLite reader for ast-index
 │   ├── git_analyzer.py     # Git history analysis (hot spots, co-changes)

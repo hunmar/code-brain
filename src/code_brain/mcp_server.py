@@ -2,8 +2,7 @@
 from __future__ import annotations
 
 import json
-import pickle
-from pathlib import Path
+from typing import Awaitable
 
 import networkx as nx
 from mcp.server import Server
@@ -32,6 +31,8 @@ TOOL_NAMES = [
     "code_map",
     "code_hotspots",
     "code_architecture",
+    "code_search",
+    "code_reason",
 ]
 
 TOOLS = [
@@ -94,7 +95,7 @@ TOOLS = [
     ),
     Tool(
         name="code_ask",
-        description="Ask a natural language question about the codebase.",
+        description="Ask a natural language question about the codebase with graph-backed semantic context.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -105,7 +106,7 @@ TOOLS = [
     ),
     Tool(
         name="code_explain",
-        description="Get an explanation of a symbol including its context and purpose.",
+        description="Explain a symbol with structural location details and semantic context.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -116,7 +117,7 @@ TOOLS = [
     ),
     Tool(
         name="code_impact",
-        description="Analyze the impact of changing a symbol: dependents, risk level, change frequency.",
+        description="Analyze change impact: dependents, risk level, and semantic business impact.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -128,7 +129,7 @@ TOOLS = [
     ),
     Tool(
         name="code_review_diff",
-        description="Review a diff for potential issues using semantic analysis.",
+        description="Review a diff for potential issues using semantic coding-rule analysis.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -177,6 +178,29 @@ TOOLS = [
             },
         },
     ),
+    Tool(
+        name="code_search",
+        description="Fast semantic search using vector chunks, optimized for quick concept lookup.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for"},
+                "top_k": {"type": "integer", "description": "Max results", "default": 10},
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="code_reason",
+        description="Run chain-of-thought-style graph reasoning for complex architecture questions.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "Complex question requiring reasoning"},
+            },
+            "required": ["question"],
+        },
+    ),
 ]
 
 
@@ -186,6 +210,41 @@ def _load_graph(config: CodeBrainConfig) -> nx.DiGraph:
     return nx.DiGraph()
 
 
+def _missing_argument(tool_name: str, argument_name: str) -> dict:
+    return {
+        "error": f"Missing required argument '{argument_name}' for tool '{tool_name}'.",
+        "hint": "Use list_tools to inspect the required input schema.",
+    }
+
+
+def _is_semantic_backend_error(error_message: str) -> bool:
+    lowered = error_message.lower()
+    patterns = [
+        "operationalerror",
+        "connection refused",
+        "unable to open database file",
+        "neo4j",
+        "qdrant",
+        "timed out",
+        "timeout",
+    ]
+    return any(pattern in lowered for pattern in patterns)
+
+
+async def _safe_semantic_call(coro: Awaitable[dict | list | str]) -> dict | list | str:
+    try:
+        return await coro
+    except Exception as exc:  # noqa: BLE001
+        details = str(exc)
+        if _is_semantic_backend_error(details):
+            return {
+                "error": "Semantic features are currently unavailable.",
+                "hint": "Run: code-brain up && code-brain ingest",
+                "details": details,
+            }
+        return {"error": f"Semantic query failed: {details}"}
+
+
 def create_server(config: CodeBrainConfig) -> Server:
     server = Server("code-brain")
 
@@ -193,7 +252,7 @@ def create_server(config: CodeBrainConfig) -> Server:
     adapter = CogneeAdapter()
     graph = _load_graph(config)
 
-    structural = StructuralQueryEngine(reader)
+    structural = StructuralQueryEngine(reader, project_root=config.project_root)
     semantic = SemanticQueryEngine(adapter)
     hybrid = HybridQueryEngine(structural, semantic, graph)
     graph_engine = GraphQueryEngine(graph)
@@ -203,9 +262,14 @@ def create_server(config: CodeBrainConfig) -> Server:
         return TOOLS
 
     @server.call_tool()
-    async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    async def handle_call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         result = await _dispatch(
-            name, arguments, structural, semantic, hybrid, graph_engine,
+            name,
+            arguments or {},
+            structural,
+            semantic,
+            hybrid,
+            graph_engine,
         )
         text = json.dumps(result, indent=2) if isinstance(result, (dict, list)) else str(result)
         return [TextContent(type="text", text=text)]
@@ -229,39 +293,64 @@ async def _dispatch(
         )
 
     if name == "code_hierarchy":
-        return structural.hierarchy(arguments["class_name"])
+        class_name = arguments.get("class_name")
+        if not class_name:
+            return _missing_argument(name, "class_name")
+        return structural.hierarchy(class_name)
 
     if name == "code_dependencies":
-        return structural.deps(arguments["module"])
+        module = arguments.get("module")
+        if not module:
+            return _missing_argument(name, "module")
+        return structural.deps(module)
 
     if name == "code_usages":
+        symbol = arguments.get("symbol")
+        if not symbol:
+            return _missing_argument(name, "symbol")
         return structural.usages(
-            arguments["symbol"],
+            symbol,
             limit=arguments.get("limit", 100),
         )
 
     if name == "code_outline":
-        return structural.outline(arguments["file_path"])
+        file_path = arguments.get("file_path")
+        if not file_path:
+            return _missing_argument(name, "file_path")
+        return structural.outline(file_path)
 
     if name == "code_ask":
-        return await semantic.ask(arguments["question"])
+        question = arguments.get("question")
+        if not question:
+            return _missing_argument(name, "question")
+        return await _safe_semantic_call(semantic.ask(question))
 
     if name == "code_explain":
-        symbol_name = arguments["symbol"]
-        found = structural.find(symbol_name)
+        symbol_name = arguments.get("symbol")
+        if not symbol_name:
+            return _missing_argument(name, "symbol")
+        found = structural.find(name=symbol_name)
         structural_info = found[0] if found else None
-        return await semantic.explain(symbol_name, structural_info)
+        return await _safe_semantic_call(
+            semantic.explain(symbol_name, structural_info)
+        )
 
     if name == "code_impact":
-        return await hybrid.impact(
-            arguments["symbol"],
-            token_budget=arguments.get("token_budget", 8000),
+        symbol = arguments.get("symbol")
+        if not symbol:
+            return _missing_argument(name, "symbol")
+        return await _safe_semantic_call(
+            hybrid.impact(
+                symbol,
+                token_budget=arguments.get("token_budget", 8000),
+            )
         )
 
     if name == "code_review_diff":
-        return await semantic.ask(
-            f"Review the following diff for potential issues:\n\n{arguments['diff']}"
-        )
+        diff = arguments.get("diff")
+        if not diff:
+            return _missing_argument(name, "diff")
+        return await _safe_semantic_call(semantic.review_diff(diff))
 
     if name == "code_map":
         return graph_engine.repo_map(
@@ -275,7 +364,24 @@ async def _dispatch(
     if name == "code_architecture":
         return graph_engine.architecture(fmt=arguments.get("format", "mermaid"))
 
-    return {"error": f"Unknown tool: {name}"}
+    if name == "code_search":
+        query = arguments.get("query")
+        if not query:
+            return _missing_argument(name, "query")
+        return await _safe_semantic_call(
+            semantic.search_fast(query, top_k=arguments.get("top_k", 10))
+        )
+
+    if name == "code_reason":
+        question = arguments.get("question")
+        if not question:
+            return _missing_argument(name, "question")
+        return await _safe_semantic_call(semantic.reason(question))
+
+    return {
+        "error": f"Unknown tool: {name}",
+        "available_tools": TOOL_NAMES,
+    }
 
 
 async def run_server(config: CodeBrainConfig, port: int | None = None) -> None:

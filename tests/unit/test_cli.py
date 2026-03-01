@@ -58,6 +58,48 @@ def test_serve_command_exists():
     assert "MCP" in result.stdout or "server" in result.stdout.lower()
 
 
+def test_search_command_exists():
+    """Verify search command is registered and help works."""
+    result = runner.invoke(app, ["search", "--help"])
+    assert result.exit_code == 0
+    assert "semantic" in result.stdout.lower() or "search" in result.stdout.lower()
+
+
+def test_reason_command_exists():
+    """Verify reason command is registered and help works."""
+    result = runner.invoke(app, ["reason", "--help"])
+    assert result.exit_code == 0
+    assert "reason" in result.stdout.lower()
+
+
+def test_search_calls_semantic_engine():
+    """search should call semantic engine search_fast with top_k."""
+    from unittest.mock import patch, MagicMock, AsyncMock
+
+    mock_engine = MagicMock()
+    mock_engine.search_fast = AsyncMock(return_value=[{"text": "auth result"}])
+
+    with patch("code_brain.cli._get_semantic_engine", return_value=mock_engine):
+        result = runner.invoke(app, ["search", "authentication", "--top-k", "3"])
+
+    assert result.exit_code == 0
+    mock_engine.search_fast.assert_called_once_with("authentication", top_k=3)
+
+
+def test_reason_calls_semantic_engine():
+    """reason should call semantic engine reason method."""
+    from unittest.mock import patch, MagicMock, AsyncMock
+
+    mock_engine = MagicMock()
+    mock_engine.reason = AsyncMock(return_value=[{"text": "Because boundaries are shared"}])
+
+    with patch("code_brain.cli._get_semantic_engine", return_value=mock_engine):
+        result = runner.invoke(app, ["reason", "Why does auth depend on users?"])
+
+    assert result.exit_code == 0
+    mock_engine.reason.assert_called_once_with("Why does auth depend on users?")
+
+
 def test_ingest_runs_ast_index_when_no_db(tmp_path, monkeypatch):
     """ingest should try ast-index rebuild when no DB exists."""
     from unittest.mock import patch, MagicMock

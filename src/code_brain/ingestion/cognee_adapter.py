@@ -1,6 +1,18 @@
 import cognee
+from cognee.modules.search.types.SearchType import SearchType
 
 from code_brain.ingestion.ast_index import Symbol, ModuleDep
+
+
+def _resolve_search_type(search_type: str | None) -> SearchType:
+    if not search_type:
+        return SearchType.GRAPH_COMPLETION
+
+    candidate = str(search_type).upper()
+    if candidate in SearchType.__members__:
+        return SearchType[candidate]
+
+    return SearchType.GRAPH_COMPLETION
 
 
 class CogneeAdapter:
@@ -35,6 +47,16 @@ class CogneeAdapter:
             )
         await cognee.cognify()
 
-    async def search(self, query: str) -> list[dict]:
-        results = await cognee.search(query_text=query)
+    async def search(
+        self,
+        query: str,
+        search_type: str = "GRAPH_COMPLETION",
+        top_k: int = 10,
+    ) -> list[dict]:
+        query_type = _resolve_search_type(search_type)
+        results = await cognee.search(
+            query_text=query,
+            query_type=query_type,
+            top_k=top_k,
+        )
         return [{"text": str(r)} for r in results]
