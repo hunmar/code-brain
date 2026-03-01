@@ -13,6 +13,7 @@ dependencies = [
     "cognee>=0.1.30",
     "mcp>=1.0.0",
     "tiktoken>=0.7.0",
+    "scipy>=1.17.1",
 ]
 
 [project.optional-dependencies]
