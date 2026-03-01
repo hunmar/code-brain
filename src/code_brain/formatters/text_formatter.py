@@ -2,7 +2,8 @@ class TextFormatter:
     def format_symbols(self, symbols: list[dict]) -> str:
         lines = []
         for s in symbols:
-            loc = f"{s['file_path']}:{s['line']}"
+            fp = s.get("file_path", "")
+            loc = f"{fp}:{s['line']}" if fp else f"L{s['line']}"
             sig = s.get("signature", "")
             lines.append(f"  {s['kind']} {s['name']}  ({loc})")
             if sig:
