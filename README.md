@@ -86,13 +86,16 @@ code-brain ask "How does authentication work?"
 
 # Graph-powered analysis
 code-brain map                    # PageRank-ranked repo overview
-code-brain map --tokens 8000      # Larger context budget
+code-brain map --budget 8000      # Larger context budget
 code-brain hotspots               # Frequently-changed code
 code-brain arch                   # Module dependency diagram (Mermaid)
 code-brain arch --format text     # Plain text diagram
 
 # Impact analysis
 code-brain impact User            # What breaks if User changes?
+
+# Diagnose setup
+code-brain doctor                  # Check what's installed and working
 
 # Start MCP server for Claude
 code-brain serve
